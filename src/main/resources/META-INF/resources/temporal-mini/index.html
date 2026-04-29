@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>temporal-mini</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    background: #f5f6fa;
+    color: #1a1d23;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: #1a1d23;
+    color: #fff;
+    padding: 0 24px;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  }
+  .header-logo {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -.3px;
+    color: #fff;
+  }
+  .header-logo span { color: #6c8eff; }
+  .header-spacer { flex: 1; }
+  .refresh-indicator {
+    font-size: 12px;
+    color: #8b95a5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #3ecf8e;
+    animation: pulse 2s infinite;
+  }
+  .dot.paused { background: #555; animation: none; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .4; }
+  }
+  .btn-icon {
+    background: none;
+    border: 1px solid #333;
+    color: #aaa;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all .15s;
+  }
+  .btn-icon:hover { border-color: #6c8eff; color: #6c8eff; }
+
+  /* ── Content ── */
+  .content { padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+  /* ── Stats ── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    background: #fff;
+    border-radius: 10px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border-color .15s, box-shadow .15s;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  .stat-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.1); }
+  .stat-card.active { border-color: var(--c); }
+  .stat-dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--c);
+    flex-shrink: 0;
+  }
+  .stat-label { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; }
+  .stat-value { font-size: 26px; font-weight: 700; color: var(--c); line-height: 1; }
+
+  .stat-card[data-state="ALL"]      { --c: #6c8eff; }
+  .stat-card[data-state="NEW"]      { --c: #6c8eff; }
+  .stat-card[data-state="RUNNING"]  { --c: #f59e0b; }
+  .stat-card[data-state="FINISHED"] { --c: #3ecf8e; }
+  .stat-card[data-state="FAILED"]   { --c: #f87171; }
+
+  /* ── Table card ── */
+  .card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    overflow: hidden;
+  }
+  .card-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    border-bottom: 1px solid #f0f0f5;
+    flex-wrap: wrap;
+  }
+  .card-toolbar-title { font-weight: 600; font-size: 14px; flex: 1; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  thead th {
+    background: #fafbff;
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: #6b7280;
+    border-bottom: 1px solid #f0f0f5;
+    white-space: nowrap;
+  }
+  tbody tr.wf-row {
+    cursor: pointer;
+    transition: background .1s;
+    border-bottom: 1px solid #f8f8fb;
+  }
+  tbody tr.wf-row:hover { background: #fafbff; }
+  tbody tr.wf-row.expanded { background: #f5f7ff; }
+  td {
+    padding: 11px 14px;
+    vertical-align: middle;
+  }
+  .id-cell { font-weight: 600; color: #6c8eff; font-size: 13px; width: 60px; }
+  .type-cell { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px; }
+  .error-cell {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #f87171;
+    font-size: 12px;
+  }
+  .time-cell { color: #6b7280; font-size: 12px; white-space: nowrap; }
+  .chevron { color: #9ca3af; font-size: 10px; transition: transform .2s; }
+  .expanded .chevron { transform: rotate(90deg); }
+
+  /* ── Badge ── */
+  .badge {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .3px;
+  }
+  .badge-NEW      { background: #eff2ff; color: #6c8eff; }
+  .badge-RUNNING  { background: #fef3c7; color: #d97706; }
+  .badge-FINISHED { background: #d1fae5; color: #059669; }
+  .badge-FAILED   { background: #fee2e2; color: #dc2626; }
+
+  /* ── Activity sub-rows ── */
+  tr.activity-container td { padding: 0; }
+  .activity-panel {
+    background: #f5f7ff;
+    border-bottom: 2px solid #e8ecff;
+    padding: 10px 18px 14px 44px;
+  }
+  .activity-panel h4 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: #6b7280;
+    margin-bottom: 8px;
+  }
+  .activity-table { width: 100%; border-collapse: collapse; }
+  .activity-table th {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    color: #9ca3af;
+    padding: 4px 10px;
+    text-align: left;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .activity-table td {
+    padding: 7px 10px;
+    font-size: 12px;
+    border-bottom: 1px solid #eef0f8;
+    vertical-align: middle;
+  }
+  .activity-table tr:last-child td { border-bottom: none; }
+  .activity-table .mono { font-family: 'SFMono-Regular', Consolas, monospace; }
+  .ok   { color: #059669; font-weight: 700; }
+  .fail { color: #dc2626; font-weight: 700; }
+  .act-error { color: #dc2626; font-size: 11px; }
+  .empty-activities { color: #9ca3af; font-size: 12px; padding: 12px 0; }
+
+  /* ── Pagination ── */
+  .pagination {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 18px;
+    border-top: 1px solid #f0f0f5;
+    justify-content: flex-end;
+  }
+  .page-info { color: #6b7280; font-size: 12px; margin-right: 8px; }
+  .page-btn {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    color: #374151;
+    width: 30px; height: 30px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .15s;
+  }
+  .page-btn:hover:not(:disabled) { border-color: #6c8eff; color: #6c8eff; }
+  .page-btn:disabled { opacity: .35; cursor: default; }
+  .page-btn.current { background: #6c8eff; border-color: #6c8eff; color: #fff; }
+
+  /* ── Empty state ── */
+  .empty-state {
+    text-align: center;
+    padding: 48px 20px;
+    color: #9ca3af;
+  }
+  .empty-state .icon { font-size: 36px; margin-bottom: 10px; }
+  .empty-state p { font-size: 14px; }
+
+  /* ── Loading skeleton ── */
+  .skeleton {
+    background: linear-gradient(90deg, #f0f0f5 25%, #e8e8f0 50%, #f0f0f5 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s infinite;
+    border-radius: 4px;
+    height: 14px;
+  }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+  .last-updated { font-size: 11px; color: #8b95a5; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-logo">⚡ temporal<span>-mini</span></div>
+  <div class="header-spacer"></div>
+  <span class="last-updated" id="lastUpdated"></span>
+  <div class="refresh-indicator">
+    <div class="dot" id="refreshDot"></div>
+    <span id="refreshLabel">auto-refresh</span>
+  </div>
+  <button class="btn-icon" id="toggleRefresh">Pause</button>
+  <button class="btn-icon" id="refreshNow">↻ Refresh</button>
+</header>
+
+<div class="content">
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat-card active" data-state="ALL" onclick="filterState(null, this)">
+      <div>
+        <div class="stat-label">All</div>
+        <div class="stat-value" id="statAll">—</div>
+      </div>
+    </div>
+    <div class="stat-card" data-state="NEW" onclick="filterState('NEW', this)">
+      <div class="stat-dot"></div>
+      <div>
+        <div class="stat-label">New</div>
+        <div class="stat-value" id="statNEW">—</div>
+      </div>
+    </div>
+    <div class="stat-card" data-state="RUNNING" onclick="filterState('RUNNING', this)">
+      <div class="stat-dot"></div>
+      <div>
+        <div class="stat-label">Running</div>
+        <div class="stat-value" id="statRUNNING">—</div>
+      </div>
+    </div>
+    <div class="stat-card" data-state="FINISHED" onclick="filterState('FINISHED', this)">
+      <div class="stat-dot"></div>
+      <div>
+        <div class="stat-label">Finished</div>
+        <div class="stat-value" id="statFINISHED">—</div>
+      </div>
+    </div>
+    <div class="stat-card" data-state="FAILED" onclick="filterState('FAILED', this)">
+      <div class="stat-dot"></div>
+      <div>
+        <div class="stat-label">Failed</div>
+        <div class="stat-value" id="statFAILED">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="card">
+    <div class="card-toolbar">
+      <span class="card-toolbar-title" id="tableTitle">All Workflows</span>
+    </div>
+    <div id="tableContainer">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:50px"></th>
+            <th>ID</th>
+            <th>Type</th>
+            <th>State</th>
+            <th>Created</th>
+            <th>Started</th>
+            <th>Next Retry</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+    <div class="pagination" id="pagination"></div>
+  </div>
+
+</div>
+
+<script>
+const BASE = '/temporal-mini/api';
+let currentState = null;
+let currentPage  = 0;
+let totalPages   = 0;
+let expandedId   = null;
+let autoRefresh  = true;
+let timer        = null;
+
+// ── Fetch helpers ────────────────────────────────────────────────────────────
+async function get(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.statusText);
+  return r.json();
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  const data = await get(`${BASE}/stats`);
+  const total = Object.values(data).reduce((a, b) => a + b, 0);
+  document.getElementById('statAll').textContent = total;
+  for (const [k, v] of Object.entries(data)) {
+    const el = document.getElementById('stat' + k);
+    if (el) el.textContent = v;
+  }
+}
+
+// ── Workflows ────────────────────────────────────────────────────────────────
+async function loadWorkflows() {
+  const stateParam = currentState ? `&state=${currentState}` : '';
+  const data = await get(`${BASE}/workflows?page=${currentPage}&size=20${stateParam}`);
+  totalPages = data.totalPages;
+  renderTable(data.content);
+  renderPagination(data.number, data.totalPages, data.totalElements);
+  document.getElementById('lastUpdated').textContent =
+    'Updated ' + new Date().toLocaleTimeString();
+}
+
+async function reload() {
+  await Promise.all([loadStats(), loadWorkflows()]);
+}
+
+// ── Render table ─────────────────────────────────────────────────────────────
+function renderTable(rows) {
+  const tbody = document.getElementById('tableBody');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="8">
+      <div class="empty-state"><div class="icon">📭</div><p>No workflows found</p></div>
+    </td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(w => `
+    <tr class="wf-row${expandedId === w.id ? ' expanded' : ''}"
+        onclick="toggleActivities(${w.id}, this)">
+      <td style="text-align:center"><span class="chevron">▶</span></td>
+      <td class="id-cell">#${w.id}</td>
+      <td class="type-cell">${esc(w.workflowType)}</td>
+      <td><span class="badge badge-${w.state}">${w.state}</span></td>
+      <td class="time-cell">${fmtDate(w.createdAt)}</td>
+      <td class="time-cell">${fmtDate(w.startedAt)}</td>
+      <td class="time-cell">${w.nextRetryAt ? fmtDate(w.nextRetryAt) : '—'}</td>
+      <td class="error-cell" title="${esc(w.errorMessage || '')}">${esc(w.errorMessage || '')}</td>
+    </tr>
+    <tr class="activity-container" id="act-row-${w.id}" style="display:none">
+      <td colspan="8">
+        <div class="activity-panel" id="act-panel-${w.id}">
+          <div class="empty-activities">Loading…</div>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+
+  // Restore expanded row after re-render
+  if (expandedId !== null) {
+    const row = document.getElementById(`act-row-${expandedId}`);
+    if (row) {
+      row.style.display = '';
+      loadActivities(expandedId);
+    }
+  }
+}
+
+// ── Toggle activities ────────────────────────────────────────────────────────
+function toggleActivities(id, rowEl) {
+  const container = document.getElementById(`act-row-${id}`);
+  if (!container) return;
+
+  const isOpen = container.style.display !== 'none';
+  // Close previously open
+  if (expandedId !== null && expandedId !== id) {
+    const prev = document.getElementById(`act-row-${expandedId}`);
+    if (prev) prev.style.display = 'none';
+    document.querySelectorAll('.wf-row.expanded').forEach(r => r.classList.remove('expanded'));
+  }
+
+  if (isOpen) {
+    container.style.display = 'none';
+    rowEl.classList.remove('expanded');
+    expandedId = null;
+  } else {
+    container.style.display = '';
+    rowEl.classList.add('expanded');
+    expandedId = id;
+    loadActivities(id);
+  }
+}
+
+async function loadActivities(id) {
+  const panel = document.getElementById(`act-panel-${id}`);
+  if (!panel) return;
+  try {
+    const acts = await get(`${BASE}/workflows/${id}/activities`);
+    renderActivities(panel, acts);
+  } catch (e) {
+    panel.innerHTML = `<span class="act-error">Failed to load activities</span>`;
+  }
+}
+
+function renderActivities(panel, acts) {
+  if (!acts.length) {
+    panel.innerHTML = '<h4>Activities</h4><div class="empty-activities">No activities yet</div>';
+    return;
+  }
+  panel.innerHTML = `
+    <h4>Activities</h4>
+    <table class="activity-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Attempt</th>
+          <th>Result</th>
+          <th>Started</th>
+          <th>Finished</th>
+          <th>Error</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${acts.map(a => `
+          <tr>
+            <td class="mono">${esc(a.name)}</td>
+            <td>#${a.attempt}</td>
+            <td>${a.success ? '<span class="ok">✓ OK</span>' : '<span class="fail">✗ FAIL</span>'}</td>
+            <td class="time-cell">${fmtDate(a.startedAt)}</td>
+            <td class="time-cell">${fmtDate(a.finishedAt)}</td>
+            <td class="act-error" title="${esc(a.errorMessage || '')}">${esc(a.errorMessage || '—')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+// ── Pagination ───────────────────────────────────────────────────────────────
+function renderPagination(page, total, totalElements) {
+  const el = document.getElementById('pagination');
+  if (total <= 1) { el.innerHTML = ''; return; }
+
+  const pages = [];
+  let start = Math.max(0, page - 2);
+  let end   = Math.min(total - 1, page + 2);
+  if (start > 0) pages.push({ n: 0, label: '1' }, { n: -1, label: '…' });
+  for (let i = start; i <= end; i++) pages.push({ n: i, label: String(i + 1) });
+  if (end < total - 1) pages.push({ n: -1, label: '…' }, { n: total - 1, label: String(total) });
+
+  el.innerHTML = `
+    <span class="page-info">${totalElements} items</span>
+    <button class="page-btn" onclick="goPage(${page - 1})" ${page === 0 ? 'disabled' : ''}>‹</button>
+    ${pages.map(p => p.n === -1
+      ? `<span style="color:#9ca3af;padding:0 4px">…</span>`
+      : `<button class="page-btn${p.n === page ? ' current' : ''}" onclick="goPage(${p.n})">${p.label}</button>`
+    ).join('')}
+    <button class="page-btn" onclick="goPage(${page + 1})" ${page >= total - 1 ? 'disabled' : ''}>›</button>
+  `;
+}
+
+function goPage(p) {
+  if (p < 0 || p >= totalPages) return;
+  currentPage = p;
+  expandedId = null;
+  loadWorkflows();
+}
+
+// ── Filter ───────────────────────────────────────────────────────────────────
+function filterState(state, card) {
+  currentState = state;
+  currentPage  = 0;
+  expandedId   = null;
+  document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+  card.classList.add('active');
+  const title = state ? (state.charAt(0) + state.slice(1).toLowerCase() + ' Workflows') : 'All Workflows';
+  document.getElementById('tableTitle').textContent = title;
+  reload();
+}
+
+// ── Auto-refresh ─────────────────────────────────────────────────────────────
+function scheduleRefresh() {
+  clearTimeout(timer);
+  if (autoRefresh) timer = setTimeout(() => { reload().finally(scheduleRefresh); }, 5000);
+}
+
+document.getElementById('toggleRefresh').addEventListener('click', function () {
+  autoRefresh = !autoRefresh;
+  this.textContent = autoRefresh ? 'Pause' : 'Resume';
+  document.getElementById('refreshDot').classList.toggle('paused', !autoRefresh);
+  document.getElementById('refreshLabel').textContent = autoRefresh ? 'auto-refresh' : 'paused';
+  scheduleRefresh();
+});
+
+document.getElementById('refreshNow').addEventListener('click', () => {
+  clearTimeout(timer);
+  reload().finally(scheduleRefresh);
+});
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                  .replace(/"/g,'&quot;');
+}
+
+function fmtDate(dt) {
+  if (!dt) return '—';
+  // dt comes as array [year,month,day,hour,min,sec] from Jackson LocalDateTime
+  if (Array.isArray(dt)) {
+    const [y, mo, d, h, mi, s] = dt;
+    const pad = n => String(n).padStart(2, '0');
+    return `${y}-${pad(mo)}-${pad(d)} ${pad(h)}:${pad(mi)}:${pad(s)}`;
+  }
+  // String ISO format fallback
+  return String(dt).replace('T', ' ').slice(0, 19);
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+reload().finally(scheduleRefresh);
+</script>
+</body>
+</html>
