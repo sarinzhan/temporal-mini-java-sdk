@@ -22,7 +22,7 @@ public interface MetricSampleRepository extends JpaRepository<MetricSample, Loca
      * counters; {@code AVG} of cumulative gauges is misleading).
      *
      * <p>Returned shape is {@code Object[]} positional: [ts, poolActive, poolFree,
-     * poolQueue, runtimeCount, cntNew, cntRunnable, cntBlocked, cntFinished, cntFailed].
+     * poolQueue, runtimeCount, cntNew, cntRetry, cntBlocked, cntFinished, cntFailed].
      */
     @Query(value = """
             SELECT date_trunc(:unit, ts)         AS bucket_ts,
@@ -31,7 +31,7 @@ public interface MetricSampleRepository extends JpaRepository<MetricSample, Loca
                    MAX(pool_queue)::INT          AS pool_queue,
                    MAX(runtime_count)::INT       AS runtime_count,
                    MAX(cnt_new)                  AS cnt_new,
-                   MAX(cnt_runnable)             AS cnt_runnable,
+                   MAX(cnt_retry)                AS cnt_retry,
                    MAX(cnt_blocked)              AS cnt_blocked,
                    MAX(cnt_finished)             AS cnt_finished,
                    MAX(cnt_failed)               AS cnt_failed

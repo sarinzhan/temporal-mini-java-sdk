@@ -6,7 +6,7 @@ export interface MetricSample {
   poolQueue: number;
   runtimeCount: number;
   cntNew: number;
-  cntRunnable: number;
+  cntRetry: number;
   cntBlocked: number;
   cntFinished: number;
   cntFailed: number;

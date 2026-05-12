@@ -18,15 +18,18 @@ export function PoolGauge() {
 
   return (
     <Paper sx={{ p: 2 }}>
-      <Stack direction="row" spacing={4} alignItems="center" flexWrap="wrap">
+      <Typography variant="caption" sx={{ textTransform: 'uppercase', fontWeight: 700, color: 'text.disabled', letterSpacing: 0.8 }}>
+        Executor (Thread Pool)
+      </Typography>
+      <Stack direction="row" spacing={4} alignItems="center" flexWrap="wrap" sx={{ mt: 1 }}>
         <Stat label="Workers"
               value={`${data.active} active`}
               hint={`${data.free} free / ${data.maxPoolSize} max`}
               progress={activePct}
               color="warning" />
-        <Stat label="Queue"
-              value={`${data.queue} waiting`}
-              hint={`${data.queueCapacity} capacity`}
+        <Stat label="Executor Queue"
+              value={`${data.queue} pending`}
+              hint={`${data.queueCapacity} slots capacity`}
               progress={queuePct}
               color="primary" />
       </Stack>

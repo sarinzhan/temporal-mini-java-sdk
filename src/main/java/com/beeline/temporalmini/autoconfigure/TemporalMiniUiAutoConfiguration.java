@@ -1,5 +1,6 @@
-package com.beeline.temporalmini.ui;
+package com.beeline.temporalmini.autoconfigure;
 
+import com.beeline.temporalmini.ui.*;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;

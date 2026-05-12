@@ -25,7 +25,7 @@ const ACTIONS: { value: Action; label: string }[] = [
   { value: 'run-now', label: 'Run now' },
 ];
 
-const STATES: WorkflowState[] = ['NEW', 'RUNNABLE', 'STOPPED', 'FINISHED', 'FAILED'];
+const STATES: WorkflowState[] = ['NEW', 'RETRY', 'STOPPED', 'FINISHED', 'FAILED'];
 
 interface Props {
   open: boolean;

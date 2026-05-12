@@ -1,2 +1,5 @@
-com.beeline.temporalmini.TemporalMiniAutoConfiguration
-com.beeline.temporalmini.ui.TemporalMiniUiAutoConfiguration
+com.beeline.temporalmini.autoconfigure.WorkflowPersistenceAutoConfiguration
+com.beeline.temporalmini.autoconfigure.WorkflowCoreAutoConfiguration
+com.beeline.temporalmini.autoconfigure.WorkflowMetricsAutoConfiguration
+com.beeline.temporalmini.autoconfigure.WorkflowSecurityAutoConfiguration
+com.beeline.temporalmini.autoconfigure.TemporalMiniUiAutoConfiguration

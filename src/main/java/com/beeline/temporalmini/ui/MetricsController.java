@@ -2,6 +2,8 @@ package com.beeline.temporalmini.ui;
 
 import com.beeline.temporalmini.MetricSample;
 import com.beeline.temporalmini.MetricSampleRepository;
+import com.beeline.temporalmini.metrics.LocalMeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,15 +37,18 @@ public class MetricsController {
     );
 
     private final MetricSampleRepository repository;
+    private final LocalMeterRegistry localMeterRegistry;
 
-    public MetricsController(MetricSampleRepository repository) {
+    public MetricsController(MetricSampleRepository repository,
+                             ObjectProvider<LocalMeterRegistry> localRegistry) {
         this.repository = repository;
+        this.localMeterRegistry = localRegistry.getIfAvailable();
     }
 
     public record SampleDto(
             LocalDateTime ts,
             int poolActive, int poolFree, int poolQueue, int runtimeCount,
-            long cntNew, long cntRunnable, long cntBlocked, long cntFinished, long cntFailed) {}
+            long cntNew, long cntRetry, long cntBlocked, long cntFinished, long cntFailed) {}
 
     public record HistoryResponse(String bucket, int count, List<SampleDto> samples) {}
 
@@ -74,7 +79,7 @@ public class MetricsController {
         return new SampleDto(
                 s.getTs(),
                 s.getPoolActive(), s.getPoolFree(), s.getPoolQueue(), s.getRuntimeCount(),
-                s.getCntNew(), s.getCntRunnable(), s.getCntBlocked(), s.getCntFinished(), s.getCntFailed());
+                s.getCntNew(), s.getCntRetry(), s.getCntBlocked(), s.getCntFinished(), s.getCntFailed());
     }
 
     /** Maps positional native-query rows to {@link SampleDto}. Order matches {@code findBucketedRaw}. */
@@ -90,6 +95,19 @@ public class MetricsController {
                 ((Number) r[7]).longValue(),
                 ((Number) r[8]).longValue(),
                 ((Number) r[9]).longValue());
+    }
+
+    /**
+     * Returns in-memory timer snapshots recorded by {@link com.beeline.temporalmini.metrics.LocalMeterRegistry}.
+     * Only available when no external Micrometer backend (actuator + exporter) is configured.
+     * Returns {@code 204 No Content} when an external registry is in use instead.
+     */
+    @GetMapping("/timers")
+    public org.springframework.http.ResponseEntity<List<LocalMeterRegistry.TimerSnapshot>> timers() {
+        if (localMeterRegistry == null) {
+            return org.springframework.http.ResponseEntity.noContent().build();
+        }
+        return org.springframework.http.ResponseEntity.ok(localMeterRegistry.snapshot());
     }
 
     private static LocalDateTime toLocalDateTime(Object v) {

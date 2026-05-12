@@ -29,7 +29,7 @@ public class MetricSample {
     private int runtimeCount;
 
     private long cntNew;
-    private long cntRunnable;
+    private long cntRetry;
     private long cntBlocked;
     private long cntFinished;
     private long cntFailed;

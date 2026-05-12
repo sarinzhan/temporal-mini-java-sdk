@@ -3,11 +3,16 @@ import { Box } from '@mui/material';
 import { StatCard } from './StatCard';
 import type { StatsByState, VisualWorkflowState } from '../../types/workflow';
 
-const ORDER: VisualWorkflowState[] = ['NEW', 'RUNNABLE', 'RUNNING', 'STOPPED', 'FINISHED', 'FAILED'];
+const ORDER: VisualWorkflowState[] = ['NEW', 'IN_QUEUE', 'WAITING', 'STOPPED', 'FINISHED', 'FAILED'];
+
+const LABELS: Partial<Record<VisualWorkflowState, string>> = {
+  IN_QUEUE: 'In Queue',
+  WAITING:  'Waiting',
+};
 
 interface Props {
   stats?: StatsByState;
-  /** Selected DB states (and 'RUNNING' for runtime view). Empty array = ALL. */
+  /** Selected filter values (state strings passed directly to the API). Empty = ALL. */
   selected: string[];
   onChange: (next: string[]) => void;
 }
@@ -15,11 +20,10 @@ interface Props {
 /**
  * Multi-select filter chips. Plain click replaces the selection; Cmd/Ctrl-click
  * toggles. Clicking the "All" tile clears the filter — same UX as the legacy UI.
+ * IN_QUEUE and WAITING are passed as-is to the API — the backend resolves them.
  */
 export function StatsCards({ stats, selected, onChange }: Props) {
-  const dbTotal = ORDER
-    .filter((s) => s !== 'RUNNING')
-    .reduce((sum, k) => sum + (stats?.[k] ?? 0), 0);
+  const dbTotal = ORDER.reduce((sum, k) => sum + (stats?.[k] ?? 0), 0);
 
   function handleClick(state: string, e: MouseEvent) {
     if (state === 'ALL') {
@@ -48,7 +52,7 @@ export function StatsCards({ stats, selected, onChange }: Props) {
       {ORDER.map((s) => (
         <StatCard
           key={s}
-          label={s.charAt(0) + s.slice(1).toLowerCase()}
+          label={LABELS[s] ?? (s.charAt(0) + s.slice(1).toLowerCase())}
           value={stats?.[s] ?? '—'}
           state={s}
           active={selected.includes(s)}

@@ -43,7 +43,7 @@ export function WorkflowControls({ workflow }: Props) {
             Run now
           </Button>
         )}
-        {(workflow.state === 'NEW' || workflow.state === 'RUNNABLE') && (
+        {(workflow.state === 'NEW' || workflow.state === 'RETRY') && (
           <Button size="small" variant="contained" color="warning"
                   startIcon={<StopIcon />} disabled={busy}
                   onClick={() => stop.mutate(id)}>

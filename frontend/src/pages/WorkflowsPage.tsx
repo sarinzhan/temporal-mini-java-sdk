@@ -8,11 +8,7 @@ import { WorkflowTable } from '../components/WorkflowTable/WorkflowTable';
 import { BulkActionBar } from '../components/BulkActionBar/BulkActionBar';
 import { useWorkflows } from '../hooks/useWorkflows';
 import { useStats } from '../hooks/useStats';
-import { useRuntime } from '../hooks/useRuntime';
 import { useLastActivities } from '../hooks/useLastActivities';
-import { workflowsApi } from '../api/workflows';
-import { useQuery } from '@tanstack/react-query';
-import { useRefreshInterval } from '../hooks/useRefreshInterval';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const PAGE_SIZE_KEY = 'temporal-mini.pageSize';
@@ -41,18 +37,10 @@ export function WorkflowsPage() {
     [rowSelection],
   );
 
-  const stats   = useStats();
-  const runtime = useRuntime();
-  // RUNNING is a runtime view (not a DB state) — when it's the only filter selected,
-  // resolve via /runtime and fetch each workflow individually, mirroring the legacy UI.
-  const runningOnly = states.length === 1 && states[0] === 'RUNNING';
-  const dbStates    = states.filter((s) => s !== 'RUNNING');
+  const stats = useStats();
 
-  const list    = useWorkflows({ page, size: pageSize, states: dbStates, sort: sortParam });
-  const runningList = useRunningWorkflows(runningOnly && runtime.data ? Object.keys(runtime.data).map(Number) : []);
-
-  const effective = runningOnly ? runningList : list;
-  const ids = effective.data?.content?.map((w) => w.id) ?? [];
+  const list = useWorkflows({ page, size: pageSize, states, sort: sortParam });
+  const ids = list.data?.content?.map((w) => w.id) ?? [];
   const lastActs = useLastActivities(ids);
 
   function handleStatesChange(next: string[]) {
@@ -76,8 +64,7 @@ export function WorkflowsPage() {
             <BulkActionBar selectedIds={selectedIds} onClear={() => setRowSelection({})} />
           )}
           <WorkflowTable
-            data={effective.data}
-            runtime={runtime.data ?? {}}
+            data={list.data}
             lastActivities={lastActs.data ?? {}}
             page={page}
             pageSize={pageSize}
@@ -111,31 +98,3 @@ function readInitialSort(): SortingState {
   return [{ id: 'id', desc: true }];
 }
 
-/**
- * Special-case query for the RUNNING-only filter: hits /runtime to learn the ids
- * then fetches each workflow individually. The set is small in practice — it's
- * bounded by the size of the executor pool.
- */
-function useRunningWorkflows(ids: number[]) {
-  const refetchInterval = useRefreshInterval();
-  const stable = useMemo(() => [...ids].sort((a, b) => a - b), [ids]);
-  return useQuery({
-    queryKey: ['running-workflows', stable],
-    queryFn: async () => {
-      const fetched = await Promise.all(
-        stable.map((id) => workflowsApi.one(id).catch(() => null)),
-      );
-      const content = fetched
-        .filter((w): w is NonNullable<typeof w> => w != null)
-        .sort((a, b) => b.id - a.id);
-      return {
-        content,
-        number: 0,
-        totalPages: 1,
-        totalElements: content.length,
-      };
-    },
-    enabled: ids.length > 0,
-    refetchInterval,
-  });
-}

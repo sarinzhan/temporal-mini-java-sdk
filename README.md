@@ -17,7 +17,7 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 - [Quick start](#quick-start)
 - [Writing a workflow](#writing-a-workflow)
 - [Retry policies](#retry-policies)
-- [Lifecycle &amp; states](#lifecycle--states)
+- [Lifecycle & states](#lifecycle--states)
 - [REST API](#rest-api)
 - [Web UI](#web-ui)
 - [Authentication](#authentication)
@@ -63,12 +63,12 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 | `WorkflowEngine` | Starts, runs, stops/resumes/restarts workflows (single + bulk). Resolves `Workflow` beans into a registry. |
 | `TemporalMiniSchemaMigrator` | Tiny forward-only SQL migrator. Reads `db/migration/temporal-mini/V*__*.sql` from the classpath and tracks applied versions in `wflow.sql_migrations`. Replaces Flyway. |
 | `MetricsSampler` | `@Scheduled` snapshot writer for the metrics chart — appends a row to `wflow.metric_sample` every 10s and trims older rows on a daily cron. |
-| `WorkflowScheduler` | `@Scheduled` poller that picks up pending workflows and submits them to the executor. |
+| `WorkflowScheduler` | `@Scheduled` poller that picks up `NEW` and `RETRY` (when `nextRetryAt <= now`) workflows and submits them to the executor. |
 | `workflowExecutor` | Bounded `ThreadPoolTaskExecutor`. Runs workflows in parallel. |
-| `WorkflowRuntimeRegistry` | In-memory set of workflow ids the engine is currently executing. Source of truth for the runtime "RUNNING" view. |
+| `WorkflowRuntimeRegistry` | In-memory set of workflow ids the engine is currently executing. Used for deduplication across overlapping polls. |
 | `WorkflowRepository` / `ActivityRepository` | Spring Data JPA repos. Two tables: `wflow.workflow`, `wflow.activity`. |
-| `ActivityMetrics` / `WorkflowMetrics` | Optional Micrometer instrumentation. Auto-registered when a `MeterRegistry` is present on the classpath; export to Prometheus/JMX/OTLP/etc. is the client's choice. |
-| `WorkflowUiController` | REST API at `/temporal-mini/api/**`: workflows, stats, runtime, pool, control actions. |
+| `ActivityMetrics` / `WorkflowMetrics` | Optional Micrometer instrumentation. Auto-registered when a `MeterRegistry` is present on the classpath. |
+| `WorkflowUiController` | REST API at `/temporal-mini/api/**`: workflows, stats, pool, control actions. |
 | `AuthController` (optional) | JSON login/logout/me at `/temporal-mini/api/auth/**` — wired only when auth is enabled. |
 | `SpaController` | Redirects `/temporal-mini` → `/temporal-mini/ui/` and serves the SPA's `index.html` for deep links. |
 | React SPA | Dashboard at `/temporal-mini/ui/` (Vite + TypeScript + TanStack Query/Table + Material UI + React Router). |
@@ -205,53 +205,62 @@ Delays are scheduled by setting `workflowEntity.nextRetryAt` and throwing — th
 
 ## Lifecycle & states
 
-The persisted state machine has **five** states. There is intentionally no `RUNNING` state in the database — "currently executing" is a transient runtime view kept in memory by `WorkflowRuntimeRegistry`. Persisting it would create restart races (a JVM crash mid-execution would leave a stale `RUNNING` row that no longer corresponds to anything). Keeping it in-memory makes the truth follow the actual runtime.
+The persisted state machine has **four** states. There is intentionally no "currently running" state in the database — in-flight execution is tracked in memory by `WorkflowRuntimeRegistry`. Persisting it would create restart races (a JVM crash mid-execution would leave a stale row that no longer corresponds to anything).
 
 > **`STOPPED` vs. legacy `BLOCKED`.** The user-facing name (Java enum, REST API, UI) is `STOPPED`. The database column still stores the literal string `"BLOCKED"` so existing data needs no migration — see `WorkflowStateConverter`.
 
+> **Legacy `RUNNABLE` rows.** If you're upgrading from a previous version that used `RUNNABLE`, `WorkflowStateConverter` maps the string `"RUNNABLE"` on read to the new `RETRY` state. No data migration needed.
+
 ```
-            start()                                  run()
-   (none) ─────────►  NEW  ───────────────────────► RUNNABLE
-                       │                              │
-                       │                              ├── all activities OK ──► FINISHED
-                       │                              ├── retries exhausted ──► FAILED
-                       │                              └── awaiting retry ──────┐
-                       │                                                       │
-                       ├──── stop() ───►   STOPPED  ◄──── stop() ──────────────┘
-                       │                     │
-                       │                     └─── resume() ──► RUNNABLE
-                       │
-                       └──── (scheduler picks up when nextRetryAt <= now)
+            start()
+   (none) ─────────►  NEW  ───────────────────────────────────────┐
+                                                                   │
+                                         engine picks up          │
+                       NEW / RETRY ◄──────────────────────────────┘
+                              │
+                              │  run()
+                              ▼
+                         (executing)
+                              │
+                  ┌───────────┼───────────┐
+                  │           │           │
+                  ▼           ▼           ▼
+               FINISHED     FAILED      RETRY
+                                     (nextRetryAt set)
+                                          │
+                                          ├── nextRetryAt in future → WAITING
+                                          └── nextRetryAt <= now    → IN QUEUE
 
-   restart()              restartFromActivity()
-        │                          │
-        ▼                          ▼
-   wipe activities         wipe activities ≥ pivot
-   reset to RUNNABLE       reset to RUNNABLE
-   (any state)             (any state)
-
-   While inside engine.run(...): id is also recorded in WorkflowRuntimeRegistry.
-   The UI overlays a "RUNNING" badge on rows whose id is in the registry.
+   stop()         → NEW / RETRY → STOPPED
+   resume()       → STOPPED / FAILED → RETRY (queued immediately)
+   restart()      → wipe activities, reset to RETRY (any state)
+   restartFromActivity() → wipe activities ≥ pivot, reset to RETRY
 ```
 
 | State | Persisted? | Picked by scheduler? | Meaning |
 |---|---|---|---|
 | `NEW` | yes | yes | created, never run |
-| `RUNNABLE` | yes | yes | queued for the next poll, or awaiting retry |
-| `RUNNING` | **no** (runtime only) | n/a | engine is actively executing it right now (overlay over `RUNNABLE`) |
+| `RETRY` | yes | yes (when `nextRetryAt <= now`) | a previous attempt failed; waiting for the next run window |
 | `STOPPED` | yes (as `"BLOCKED"`) | **no** | manually paused — won't be picked up |
 | `FINISHED` | yes | no | completed successfully (terminal) |
 | `FAILED` | yes | no | exhausted retries (terminal) |
 
+The UI shows two additional **derived** views computed server-side from `RETRY` rows:
+
+| UI label | Meaning |
+|---|---|
+| **In Queue** | `NEW` + `RETRY` rows where `nextRetryAt <= now` — ready to be picked up on the next poll |
+| **Waiting** | `RETRY` rows where `nextRetryAt > now` — sleeping until their retry window opens |
+
 **Manual controls** (also exposed in the UI):
 
-- `engine.runNow(id)` — sets `nextRetryAt = now`. If the workflow is `FAILED` or `STOPPED`, also flips it back to `RUNNABLE`. Forbidden on `FINISHED`.
-- `engine.stop(id)` — `NEW` or `RUNNABLE` → `STOPPED`. Forbidden on terminal states.
-- `engine.resume(id)` — `STOPPED` or `FAILED` → `RUNNABLE` and queues for immediate pickup.
-- `engine.restart(id)` — wipes every activity row for this workflow and resets state to `RUNNABLE`. Allowed in any state. **Destructive** — operators should confirm.
-- `engine.restartFromActivity(id, activityId)` — deletes activity rows whose `startedAt >= chosen.startedAt` (the pivot and everything after it), resets state to `RUNNABLE`. Earlier successful activities stay cached.
-- Bulk variants — `stopAll`, `resumeAll`, `restartAll`, `runNowAll` — accept a `Collection<Long>` and return the number of workflows successfully transitioned. Illegal transitions are skipped silently so a single bad row in a wide selection doesn't fail the whole operation.
-- Payload editing — `engine.setPayload(id, ...)` (allowed in `NEW`/`STOPPED`/`FAILED`); `engine.setActivityPayload(id, activityId, payload, output)` for an activity's input or output (no state check — operator's responsibility).
+- `engine.runNow(id)` — sets `nextRetryAt = now`. If the workflow is `FAILED` or `STOPPED`, also flips it to `RETRY`. Forbidden on `FINISHED`.
+- `engine.stop(id)` — `NEW` or `RETRY` → `STOPPED`. Forbidden on terminal states.
+- `engine.resume(id)` — `STOPPED` or `FAILED` → `RETRY` and queues for immediate pickup.
+- `engine.restart(id)` — wipes every activity row for this workflow and resets state to `RETRY`. Allowed in any state. **Destructive** — operators should confirm.
+- `engine.restartFromActivity(id, activityId)` — deletes activity rows whose `startedAt >= chosen.startedAt` (the pivot and everything after it), resets state to `RETRY`. Earlier successful activities stay cached.
+- Bulk variants — `stopAll`, `resumeAll`, `restartAll`, `runNowAll` — accept a `Collection<Long>` and return the number of workflows successfully transitioned. Illegal transitions are skipped silently.
+- Payload editing — `engine.setPayload(id, ...)` (allowed in `NEW`/`RETRY`/`STOPPED`/`FAILED`); `engine.setActivityPayload(id, activityId, payload, output)` for an activity's input or output (no state check — operator's responsibility).
 
 ---
 
@@ -261,21 +270,20 @@ All endpoints are mounted under `/temporal-mini/api`:
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/stats` | Counts of workflows per persisted state, plus a transient `RUNNING` count from the runtime registry. |
-| `GET` | `/runtime` | Map of `{workflowId: epochMillisStartedRunning}` — workflows the engine is processing right now. |
+| `GET` | `/stats` | Counts per logical state: `NEW`, `IN_QUEUE`, `WAITING`, `STOPPED`, `FINISHED`, `FAILED`. `IN_QUEUE` and `WAITING` are derived from `RETRY` rows split by `nextRetryAt`. |
 | `GET` | `/pool` | Live snapshot of the workflow executor: `{active, free, poolSize, corePoolSize, maxPoolSize, queue, queueCapacity}`. |
-| `GET` | `/metrics/history?from=&to=&bucket=` | Time-series of pool/state/runtime counters. `bucket` ∈ `raw / second / minute / hour / day` — the wide windows aggregate via Postgres `date_trunc`. |
-| `GET` | `/workflows?state=&page=&size=&sort=` | Paged list. `state` repeats for multi-select: `?state=NEW&state=RUNNABLE` (comma-separated also works). `sort=field,dir` where field ∈ `id / createdAt / state` and dir ∈ `asc / desc`; default `id,desc`. |
+| `GET` | `/metrics/history?from=&to=&bucket=` | Time-series of pool/state/runtime counters. `bucket` ∈ `raw / second / minute / hour / day` — wide windows aggregate via Postgres `date_trunc`. |
+| `GET` | `/workflows?state=&page=&size=&sort=` | Paged list. `state` repeats for multi-select: `?state=NEW&state=RETRY`. `sort=field,dir` where field ∈ `id / createdAt / state` and dir ∈ `asc / desc`; default `id,desc`. |
 | `GET` | `/workflows/{id}` | Single workflow record. |
 | `GET` | `/workflows/{id}/activities` | All activity attempts for a workflow, ordered by `startedAt`. |
 | `GET` | `/last-activities?ids=1,2,3` | Latest activity per workflow id: `{name, attempt, lastAttemptAt}`. Used by the dashboard. |
 | `POST` | `/workflows/{id}/run-now` | Force-run on next poll. |
-| `POST` | `/workflows/{id}/stop` | `NEW`/`RUNNABLE` → `STOPPED`. |
-| `POST` | `/workflows/{id}/resume` | `STOPPED`/`FAILED` → `RUNNABLE`, queue for immediate pickup. |
-| `POST` | `/workflows/{id}/restart` | Wipe all activities and reset to `RUNNABLE`. Destructive. |
-| `POST` | `/workflows/{id}/restart-from-activity` | Body `{activityId}`. Wipe activities at/after the pivot, reset to `RUNNABLE`. |
+| `POST` | `/workflows/{id}/stop` | `NEW`/`RETRY` → `STOPPED`. |
+| `POST` | `/workflows/{id}/resume` | `STOPPED`/`FAILED` → `RETRY`, queue for immediate pickup. |
+| `POST` | `/workflows/{id}/restart` | Wipe all activities and reset to `RETRY`. Destructive. |
+| `POST` | `/workflows/{id}/restart-from-activity` | Body `{activityId}`. Wipe activities at/after the pivot, reset to `RETRY`. |
 | `POST` | `/workflows/bulk/{stop,resume,restart,run-now}` | Body either `{ids: [...]}` or `{from, to, states?: []}`. Returns `{affected: N}`. |
-| `PUT`  | `/workflows/{id}/payload` | Body `{payload}`. Replace the workflow input. Allowed in `NEW`/`STOPPED`/`FAILED`. |
+| `PUT`  | `/workflows/{id}/payload` | Body `{payload}`. Replace the workflow input. Allowed in `NEW`/`RETRY`/`STOPPED`/`FAILED`. |
 | `PUT`  | `/workflows/{id}/activities/{activityId}/input` | Body `{payload}`. Edit a stored activity input. |
 | `PUT`  | `/workflows/{id}/activities/{activityId}/output` | Body `{payload}`. Edit a stored activity output (use with care — this is the cached "successful" result). |
 | `POST` | `/auth/login` | JSON `{username, password}` — sets a session cookie. Only present when [auth](#authentication) is enabled. |
@@ -295,7 +303,7 @@ The dashboard is a React SPA (`frontend/`) — Vite + TypeScript (strict) + TanS
 | Folder | What lives there |
 |---|---|
 | `frontend/src/api/` | REST client (`client.ts`, base URL is dynamic) + per-resource modules (`workflows.ts`, `auth.ts`, `pool.ts`, `controls.ts`, `metrics.ts`, `edits.ts`). |
-| `frontend/src/hooks/` | One TanStack Query hook per query (`useWorkflows`, `useStats`, `useRuntime`, `usePool`, `useWorkflow`, `useActivities`, `useLastActivities`, `useMetricsHistory`); mutations live in `useWorkflowControls` (run/stop/resume/restart + bulk) and `useEditPayload`. |
+| `frontend/src/hooks/` | One TanStack Query hook per query (`useWorkflows`, `useStats`, `usePool`, `useWorkflow`, `useActivities`, `useLastActivities`, `useMetricsHistory`); mutations live in `useWorkflowControls` (run/stop/resume/restart + bulk) and `useEditPayload`. |
 | `frontend/src/contexts/` | `AuthContext` (login/logout/me; auto-rechecks on backend switch), `RefreshIntervalContext` (manual polling cadence in `localStorage`), `BackendContext` (list of API base URLs the operator can switch between). |
 | `frontend/src/pages/` | `LoginPage`, `WorkflowsPage`, `WorkflowDetailsPage`, `MetricsPage`. |
 | `frontend/src/components/` | Presentational pieces: `Header/` (tabs + backend select + refresh select), `StatsCards/`, `PoolGauge/`, `WorkflowTable/`, `WorkflowControls/`, `BulkActionBar/`, `ActivityList/`, `JsonViewer/`, `StatusBadge/`, `RelativeTime/`, `PayloadEditDialog/`, `MetricsCharts/`, `Toast/`, `ProtectedRoute.tsx`. |
@@ -305,30 +313,30 @@ The dashboard is a React SPA (`frontend/`) — Vite + TypeScript (strict) + TanS
 ### Features
 
 #### Workflows page (`/workflows`)
-- **Pool gauge** — workers (active vs. free / max) and queue depth (current vs. capacity), backed by `GET /pool`.
-- **Stats cards** — `ALL`, `NEW`, `RUNNABLE`, `RUNNING`, `STOPPED`, `FINISHED`, `FAILED`. Cmd/Ctrl-click to multi-select; plain click replaces. The `RUNNING` card filters to workflows currently in the runtime registry (resolved by id, not by DB state).
-- **Workflow list** — TanStack Table with id, type, state, **relative-time** Created / Last run / Next run (auto-updating, hover for absolute timestamp), current activity name, attempts, error. Click any header on `id`/`createdAt`/`state` to sort (server-side). Per-row badge swaps to a pulsing `RUNNING` whenever the id is in the runtime registry.
+- **Executor (Thread Pool)** panel — workers (active vs. free / max) and executor queue depth (current vs. slot capacity). Note: the executor queue capacity (default 100) is the number of tasks the thread pool can buffer internally — it is separate from the number of workflows waiting in the database. Backed by `GET /pool`.
+- **Stats cards** — `ALL`, `NEW`, `In Queue`, `Waiting`, `Retry`, `STOPPED`, `FINISHED`, `FAILED`. `In Queue` and `Waiting` both filter the list by `RETRY` in the DB. Cmd/Ctrl-click to multi-select; plain click replaces.
+- **Workflow list** — TanStack Table with id, type, state, **relative-time** Created / Last run / Next run (auto-updating, hover for absolute timestamp), current activity name, attempts, error. Click any header on `id`/`createdAt`/`state` to sort (server-side).
 - **Pagination** — page-size picker (10 / 20 / 50 / 100), persisted in `localStorage`.
 - **Multi-select + bulk actions** — checkbox column on each row. When ≥1 workflow is selected, a sticky `BulkActionBar` appears: `Run now`, `Stop`, `Resume`, `Restart`, plus "By time range…" which builds a `{from, to, states}` filter and dispatches against `/workflows/bulk/*`. Destructive actions (Restart) confirm before firing.
-- **"Next run"** ticks every second with an adaptive format. When the workflow is executing it switches to a stopwatch (`running 12s`); when the deadline has passed it counts upward (`+5s overdue`).
+- **"Next run"** ticks every second with an adaptive format. When the deadline has passed it counts upward (`+5s overdue`).
 
 #### Workflow details (`/workflows/:id`)
 - Meta block (created / started / next-run / activity count), single-workflow controls (`Run now` / `Stop` / `Resume` / `Restart` with confirm).
-- **Edit input** button on the workflow's initial payload (only in `NEW`/`STOPPED`/`FAILED`) — opens `PayloadEditDialog` with optional JSON validation.
+- **Edit input** button on the workflow's initial payload (only in `NEW`/`RETRY`/`STOPPED`/`FAILED`) — opens `PayloadEditDialog` with optional JSON validation.
 - **Activities grouped by name** with `Restart from here` button on each group header (re-execute that activity and everything after it, earlier ones stay cached).
 - Each attempt expands to show input/output JSON; both fields have inline `Edit` buttons.
 - **JSON viewer** — inline preview with click-to-expand fullscreen dialog.
 
 #### Metrics (`/metrics`)
 - Window picker `5m / 30m / 1h / 6h / 24h / 7d / 14d` (persisted). Bucket size is chosen client-side so wide windows still fit ≤300 points.
-- **Pool & queue** chart (`pool_free` + queue depth over time).
-- **Workflows by state** chart with multi-select Autocomplete — operator adds/removes states; defaults to `RUNNABLE / STOPPED / FAILED`.
+- **Pool & queue** chart (`pool_free` + executor queue depth over time).
+- **Workflows by state** chart with multi-select Autocomplete — operator adds/removes states; defaults to `RETRY / STOPPED / FAILED`.
 - **Throughput** chart computed client-side as the delta of cumulative `cnt_finished` / `cnt_failed` between adjacent buckets.
 
 #### Header (everywhere)
 - **Tabs** — `Workflows` / `Metrics`, synced with the URL.
 - **Backend switcher** — dropdown lists configured environments and a "Manage…" entry to add/remove. Switching clears React Query cache and re-runs `/auth/me`. State stored in `localStorage`. Cross-origin URLs require CORS on the backend.
-- **Refresh interval picker** — `Off / 2s / 5s / 10s / 30s`. Selection persists in `localStorage` and drives `refetchInterval` on every TanStack Query hook (no globals; the `RefreshIntervalContext` is the single source of truth).
+- **Refresh interval picker** — `Off / 2s / 5s / 10s / 30s`. Selection persists in `localStorage` and drives `refetchInterval` on every TanStack Query hook.
 - **Login page** at `/login` (only when [auth](#authentication) is enabled). When auth is disabled the UI runs as `anonymous` without a login screen.
 - **Global error toast** — any failed query/mutation (network, 5xx) surfaces a `Snackbar`; 401s are routed through the auth flow instead.
 
@@ -373,7 +381,7 @@ When enabled:
 - `POST /temporal-mini/api/auth/login` accepts `{"username","password"}`, sets a session cookie, returns `{"username":"…"}`.
 - `POST /temporal-mini/api/auth/logout` invalidates the session.
 - `GET /temporal-mini/api/auth/me` returns `200 {username}` or `401`.
-- CSRF is disabled (same-origin SPA with `SameSite=Lax` cookies). HTTP Basic and form login are intentionally turned off — there's no popup, no redirect.
+- CSRF is disabled (same-origin SPA with `SameSite=Lax` cookies). HTTP Basic and form login are intentionally turned off.
 
 When disabled (`workflow.ui.security.enabled=false`, the default), all `/temporal-mini/**` endpoints are open and the SPA runs as `anonymous` with no login screen.
 
@@ -390,7 +398,7 @@ To use multiple users, an external user store, or LDAP, define your own `UserDet
 | `workflow.scheduler.enabled` | `true` | Turn the polling scheduler on/off. |
 | `workflow.scheduler.interval-ms` | `5000` | Poll interval (`@Scheduled` fixed delay). |
 | `workflow.scheduler.pool-size` | CPU count | Worker thread pool size. |
-| `workflow.scheduler.queue-capacity` | `100` | Task queue capacity before back-pressure (`CallerRunsPolicy`) kicks in. |
+| `workflow.scheduler.queue-capacity` | `100` | Executor task queue capacity before back-pressure (`CallerRunsPolicy`) kicks in. |
 | `workflow.scheduler.thread-name-prefix` | `wflow-` | Prefix for worker thread names. |
 | `temporal-mini.ui.enabled` | `true` | Mount the REST API + dashboard. |
 | `workflow.ui.security.enabled` | `false` | Require login for `/temporal-mini/**`. Needs Spring Security on the classpath. |
@@ -404,7 +412,7 @@ To use multiple users, an external user store, or LDAP, define your own `UserDet
 The bean name is `workflowExecutor`. Define your own bean of the same name to override the executor entirely:
 
 ```java
-@Bean(name = TemporalMiniAutoConfiguration.EXECUTOR_BEAN, destroyMethod = "shutdown")
+@Bean(name = WorkflowCoreAutoConfiguration.EXECUTOR_BEAN, destroyMethod = "shutdown")
 public Executor workflowExecutor() { /* your custom executor */ }
 ```
 
@@ -433,7 +441,7 @@ The frontend lives in `frontend/`. It builds straight into `src/main/resources/M
 2. Runs `npm install` in `frontend/`.
 3. Runs `npm run build` (`tsc` + Vite) which writes the bundle to the resources path above.
 
-The plugin runs every `mvn` invocation from `generate-resources` onward (so `mvn compile` triggers it too — the Java code references the bundled resources). To skip the frontend build pass `-Dfrontend.skip=true`:
+The plugin runs every `mvn` invocation from `generate-resources` onward. To skip the frontend build pass `-Dfrontend.skip=true`:
 
 ```sh
 ./mvnw -Dfrontend.skip=true package
@@ -461,9 +469,9 @@ npm run dev         # dev server on :5173 with API proxy to :8080
 
 `temporal-mini` owns the `wflow` schema with four tables:
 
-- `wflow.workflow` — one row per workflow (state, payload, retry timestamp, error). The `state` column stores `"BLOCKED"` for the `STOPPED` enum value (legacy alias, preserved on disk by `WorkflowStateConverter`).
+- `wflow.workflow` — one row per workflow (state, payload, retry timestamp, error). The `state` column stores `"BLOCKED"` for `STOPPED` and will transparently read `"RUNNABLE"` as `RETRY` for backward compatibility with older rows.
 - `wflow.activity` — one row per **attempt** (workflow id, name, attempt #, success, payloads, error).
-- `wflow.metric_sample` — one row per metrics snapshot (timestamp PK, pool/queue/runtime counters and per-state counts).
+- `wflow.metric_sample` — one row per metrics snapshot (timestamp PK, pool/queue counters and per-state counts including `cnt_retry`).
 - `wflow.sql_migrations` — bookkeeping table for the built-in migrator: applied version, name, applied-at timestamp.
 
 The migrator runs on startup, scans the classpath for `db/migration/temporal-mini/V*__*.sql`, applies any pending versions in order (each in its own transaction), and inserts a row into `wflow.sql_migrations`. Indexes (`idx_workflow_state_retry`, `idx_activity_workflow_name`, `idx_metric_sample_ts`) are created by those migrations.
@@ -503,12 +511,24 @@ management.endpoints.web.exposure.include=prometheus
 
 Prometheus then scrapes `/actuator/prometheus`.
 
+**Exported gauges and counters:**
+
+| Metric | Type | What it measures |
+|---|---|---|
+| `temporalmini.workflows.new` | Counter | Total workflows ever created (increments on `engine.start()`). |
+| `temporalmini.workflows.running` | Gauge | Workflows actively executing in the thread pool right now (from `executor.getActiveCount()`). |
+| `temporalmini.workflows.queued` | Gauge | `NEW` + `RETRY` rows where `nextRetryAt <= now` — ready for the next poll. |
+| `temporalmini.workflows.waiting` | Gauge | `RETRY` rows where `nextRetryAt > now` — sleeping until their retry window opens. |
+| `temporalmini.workflows.stopped` | Gauge | Workflows manually paused. |
+| `temporalmini.workflows.finished` | Gauge | Workflows completed successfully. |
+| `temporalmini.workflows.failed` | Gauge | Workflows that exhausted all retries. |
+
 **Exported timers** (both publish percentile histograms — `_bucket` series for p50/p95/p99):
 
 | Metric | Tags | What it measures |
 |---|---|---|
-| `temporalmini.workflow.duration` | `workflow`, `status` ∈ `success` / `failure` | One attempt of `Workflow.run(ctx)`. A retry-scheduling exception counts as `failure`. |
-| `temporalmini.activity.duration` | `workflow`, `activity`, `status` ∈ `success` / `failure` | The user's activity function only — the surrounding cache lookup and persistence are not counted. |
+| `temporalmini.workflow.duration` | `workflow`, `status` ∈ `success` / `failure` | One attempt of `Workflow.run(ctx)`. |
+| `temporalmini.activity.duration` | `workflow`, `activity`, `status` ∈ `success` / `failure` | The user's activity function only — surrounding cache lookup and persistence not counted. |
 
 Each timer exports `_count` (invocations), `_sum` (total time) and `_max`. Average over a window is `rate(..._sum[5m]) / rate(..._count[5m])`.
 
@@ -536,3 +556,6 @@ Yes — the header has a backend switcher. Add an entry with the absolute base U
 
 **My UI was working before this upgrade — why did the `/block` and `/unblock` endpoints disappear?**
 They were renamed to `/stop` and `/resume`. Same semantics; the database string for the `STOPPED` state is still `"BLOCKED"` so existing workflows keep working without a data migration.
+
+**I'm upgrading from a version that had `RUNNABLE` state — do I need to migrate data?**
+No. `WorkflowStateConverter` transparently maps the string `"RUNNABLE"` on read to the new `RETRY` enum value. The migration `V4__rename_runnable_to_retry.sql` renames the `cnt_runnable` column in `wflow.metric_sample` to `cnt_retry` — this runs automatically on startup.

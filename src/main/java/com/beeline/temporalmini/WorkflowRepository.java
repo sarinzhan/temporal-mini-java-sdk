@@ -14,9 +14,31 @@ public interface WorkflowRepository extends JpaRepository<WorkflowEntity, Long> 
 
     @Query("SELECT w FROM WorkflowEntity w WHERE w.state IN " +
            "(com.beeline.temporalmini.WorkflowState.NEW, " +
-           "com.beeline.temporalmini.WorkflowState.RUNNABLE) " +
+           "com.beeline.temporalmini.WorkflowState.RETRY) " +
            "AND (w.nextRetryAt IS NULL OR w.nextRetryAt <= :now)")
     List<WorkflowEntity> findPendingWorkflows(@Param("now") LocalDateTime now);
+
+    @Query("SELECT COUNT(w) FROM WorkflowEntity w WHERE w.state IN " +
+           "(com.beeline.temporalmini.WorkflowState.NEW, " +
+           "com.beeline.temporalmini.WorkflowState.RETRY) " +
+           "AND (w.nextRetryAt IS NULL OR w.nextRetryAt <= :now)")
+    long countQueued(@Param("now") LocalDateTime now);
+
+    @Query("SELECT COUNT(w) FROM WorkflowEntity w WHERE w.state = " +
+           "com.beeline.temporalmini.WorkflowState.RETRY " +
+           "AND w.nextRetryAt > :now")
+    long countWaiting(@Param("now") LocalDateTime now);
+
+    /** RETRY rows where nextRetryAt <= now — ready for pickup (IN_QUEUE view). */
+    @Query("SELECT w FROM WorkflowEntity w WHERE " +
+           "(w.state = com.beeline.temporalmini.WorkflowState.NEW OR " +
+           "(w.state = com.beeline.temporalmini.WorkflowState.RETRY AND (w.nextRetryAt IS NULL OR w.nextRetryAt <= :now)))")
+    Page<WorkflowEntity> findInQueue(@Param("now") LocalDateTime now, Pageable pageable);
+
+    /** RETRY rows where nextRetryAt > now — sleeping until retry window (WAITING view). */
+    @Query("SELECT w FROM WorkflowEntity w WHERE " +
+           "w.state = com.beeline.temporalmini.WorkflowState.RETRY AND w.nextRetryAt > :now")
+    Page<WorkflowEntity> findWaiting(@Param("now") LocalDateTime now, Pageable pageable);
 
     Page<WorkflowEntity> findByState(WorkflowState state, Pageable pageable);
 

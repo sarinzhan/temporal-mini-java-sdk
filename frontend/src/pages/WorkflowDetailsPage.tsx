@@ -12,7 +12,6 @@ import { NextRunCell } from '../components/WorkflowTable/NextRunCell';
 import { PayloadEditDialog } from '../components/PayloadEditDialog/PayloadEditDialog';
 import { useWorkflow } from '../hooks/useWorkflow';
 import { useActivities } from '../hooks/useActivities';
-import { useRuntime } from '../hooks/useRuntime';
 import { useEditPayload } from '../hooks/useEditPayload';
 import { fmtDate } from '../utils/format';
 
@@ -24,7 +23,6 @@ export function WorkflowDetailsPage() {
 
   const { data: workflow, isLoading, error } = useWorkflow(id);
   const { data: activities = [] } = useActivities(id);
-  const { data: runtime = {} } = useRuntime();
   const { setWorkflowPayload } = useEditPayload(id);
   const [editOpen, setEditOpen] = useState(false);
 
@@ -45,7 +43,7 @@ export function WorkflowDetailsPage() {
               <Paper sx={{ p: 2.5 }}>
                 <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap" sx={{ mb: 2 }}>
                   <Typography variant="h6" sx={{ fontWeight: 700 }}>Workflow #{workflow.id}</Typography>
-                  <StatusBadge state={runtime[workflow.id] != null ? 'RUNNING' : workflow.state} />
+                  <StatusBadge state={workflow.state} />
                   <Typography sx={{ fontFamily: 'SFMono-Regular, Consolas, monospace', color: 'primary.main' }}>
                     {workflow.workflowType}
                   </Typography>
@@ -61,7 +59,7 @@ export function WorkflowDetailsPage() {
                   <Meta label="Created"  value={fmtDate(workflow.createdAt)} />
                   <Meta label="Started"  value={fmtDate(workflow.startedAt)} />
                   <Meta label="Next run">
-                    <NextRunCell workflow={workflow} runningSince={runtime[workflow.id] ?? null} />
+                    <NextRunCell workflow={workflow} />
                   </Meta>
                   <Meta label="Activities" value={`${activities.length}`} />
                 </Box>

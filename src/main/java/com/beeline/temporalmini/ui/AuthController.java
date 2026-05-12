@@ -21,7 +21,7 @@ import java.util.Map;
  * frontend handles routing to the login page itself.
  *
  * <p>Only registered when {@code workflow.ui.security.enabled=true} (see
- * {@code TemporalMiniAutoConfiguration.WorkflowSecurityConfig}).
+ * {@code WorkflowSecurityAutoConfiguration}).
  */
 @RestController
 @RequestMapping("/temporal-mini/api/auth")

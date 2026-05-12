@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 public class WorkflowEngine {
 
     private static final Set<WorkflowState> RUN_NOW_FORBIDDEN = EnumSet.of(WorkflowState.FINISHED);
-    private static final Set<WorkflowState> STOPPABLE   = EnumSet.of(WorkflowState.NEW, WorkflowState.RUNNABLE);
+    private static final Set<WorkflowState> STOPPABLE   = EnumSet.of(WorkflowState.NEW, WorkflowState.RETRY);
     private static final Set<WorkflowState> RESUMABLE   = EnumSet.of(WorkflowState.STOPPED, WorkflowState.FAILED);
 
     private final Map<String, Workflow> registry;
@@ -58,6 +58,7 @@ public class WorkflowEngine {
         entity.setState(WorkflowState.NEW);
         entity.setCreatedAt(LocalDateTime.now());
         workflowRepository.save(entity);
+        if (workflowMetrics != null) workflowMetrics.recordCreated();
         log.info("[{}:{}] created", workflowType, entity.getId());
         return entity.getId();
     }
@@ -65,9 +66,9 @@ public class WorkflowEngine {
     /**
      * Execute one attempt of the workflow.
      *
-     * <p>Note: the persisted state stays {@code RUNNABLE} for the entire duration of an
-     * active run. "Currently running" is tracked separately via {@link WorkflowRuntimeRegistry},
-     * not in the database — see {@link WorkflowState} javadoc for the rationale.
+     * <p>Note: there is no "currently running" persisted state. "In-flight" execution is
+     * tracked separately via {@link WorkflowRuntimeRegistry} — see {@link WorkflowState}
+     * javadoc for the rationale.
      */
     public void run(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
@@ -75,7 +76,6 @@ public class WorkflowEngine {
             log.debug("[{}:{}] skipped — STOPPED", entity.getWorkflowType(), workflowId);
             return;
         }
-        entity.setState(WorkflowState.RUNNABLE);
         if (entity.getStartedAt() == null) {
             entity.setStartedAt(LocalDateTime.now());
         }
@@ -90,7 +90,8 @@ public class WorkflowEngine {
             log.info("[{}:{}] FINISHED", entity.getWorkflowType(), workflowId);
         } catch (ActivityException ex) {
             if (entity.getNextRetryAt() != null) {
-                log.info("[{}:{}] waiting — next run at {}", entity.getWorkflowType(), workflowId, entity.getNextRetryAt());
+                entity.setState(WorkflowState.RETRY);
+                log.info("[{}:{}] RETRY — next run at {}", entity.getWorkflowType(), workflowId, entity.getNextRetryAt());
             } else {
                 entity.setState(WorkflowState.FAILED);
                 entity.setErrorMessage(ex.getMessage());
@@ -109,7 +110,7 @@ public class WorkflowEngine {
     /**
      * Schedule the workflow to be picked up by the scheduler immediately.
      * Allowed for any non-FINISHED state. FAILED and STOPPED workflows are
-     * reset to RUNNABLE so the scheduler will pick them up.
+     * reset to RETRY so the scheduler will pick them up.
      */
     public void runNow(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
@@ -119,7 +120,7 @@ public class WorkflowEngine {
         }
         entity.setNextRetryAt(LocalDateTime.now());
         if (entity.getState() == WorkflowState.FAILED || entity.getState() == WorkflowState.STOPPED) {
-            entity.setState(WorkflowState.RUNNABLE);
+            entity.setState(WorkflowState.RETRY);
             entity.setErrorMessage(null);
         }
         workflowRepository.save(entity);
@@ -138,14 +139,14 @@ public class WorkflowEngine {
         log.info("[{}:{}] STOPPED", entity.getWorkflowType(), workflowId);
     }
 
-    /** Resume a STOPPED or FAILED workflow — moves to RUNNABLE so the scheduler resumes it. */
+    /** Resume a STOPPED or FAILED workflow — moves to RETRY so the scheduler resumes it. */
     public void resume(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
         if (!RESUMABLE.contains(entity.getState())) {
             throw new IllegalStateException(
                     "Cannot resume workflow in state " + entity.getState() + " — only STOPPED/FAILED allowed");
         }
-        entity.setState(WorkflowState.RUNNABLE);
+        entity.setState(WorkflowState.RETRY);
         entity.setErrorMessage(null);
         entity.setNextRetryAt(LocalDateTime.now());
         workflowRepository.save(entity);
@@ -154,7 +155,7 @@ public class WorkflowEngine {
 
     /**
      * Restart from scratch: wipe all activity rows so the next replay re-executes every
-     * step. Reset state to RUNNABLE, clear started/error/retry-at, schedule for immediate
+     * step. Reset state to RETRY, clear started/error/retry-at, schedule for immediate
      * pickup. Allowed in any state — operators use this to retry a dead workflow.
      *
      * <p>This is destructive: per-attempt history for this workflow is permanently gone.
@@ -164,7 +165,7 @@ public class WorkflowEngine {
     public void restart(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
         activityRepository.deleteByWorkflowId(workflowId);
-        entity.setState(WorkflowState.RUNNABLE);
+        entity.setState(WorkflowState.RETRY);
         entity.setStartedAt(null);
         entity.setErrorMessage(null);
         entity.setNextRetryAt(LocalDateTime.now());
@@ -174,7 +175,7 @@ public class WorkflowEngine {
 
     /**
      * Restart starting from a specific activity — every activity row whose
-     * {@code startedAt >= chosen.startedAt} is deleted, the workflow is reset to RUNNABLE
+     * {@code startedAt >= chosen.startedAt} is deleted, the workflow is reset to RETRY
      * and queued for immediate pickup. Earlier activities remain in the cache so replay
      * skips over them.
      */
@@ -191,7 +192,7 @@ public class WorkflowEngine {
         }
         int deleted = activityRepository.deleteByWorkflowIdAndStartedAtGreaterThanEqual(
                 workflowId, pivot.getStartedAt());
-        entity.setState(WorkflowState.RUNNABLE);
+        entity.setState(WorkflowState.RETRY);
         entity.setErrorMessage(null);
         entity.setNextRetryAt(LocalDateTime.now());
         workflowRepository.save(entity);
@@ -225,7 +226,7 @@ public class WorkflowEngine {
      * make the input largely irrelevant; once finished, editing it would be misleading.
      */
     private static final Set<WorkflowState> PAYLOAD_EDITABLE =
-            EnumSet.of(WorkflowState.NEW, WorkflowState.STOPPED, WorkflowState.FAILED);
+            EnumSet.of(WorkflowState.NEW, WorkflowState.RETRY, WorkflowState.STOPPED, WorkflowState.FAILED);
 
     public void setPayload(Long workflowId, String payload) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();

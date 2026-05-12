@@ -1,6 +1,7 @@
 package com.beeline.temporalmini.ui;
 
 import com.beeline.temporalmini.*;
+import com.beeline.temporalmini.autoconfigure.WorkflowCoreAutoConfiguration;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.domain.*;
 import org.springframework.http.ResponseEntity;
@@ -26,7 +27,7 @@ public class WorkflowUiController {
                                 WorkflowRepository workflowRepository,
                                 ActivityRepository activityRepository,
                                 WorkflowRuntimeRegistry runtimeRegistry,
-                                @Qualifier(TemporalMiniAutoConfiguration.EXECUTOR_BEAN)
+                                @Qualifier(WorkflowCoreAutoConfiguration.EXECUTOR_BEAN)
                                 ThreadPoolTaskExecutor workflowExecutor) {
         this.workflowEngine = workflowEngine;
         this.workflowRepository = workflowRepository;
@@ -57,13 +58,14 @@ public class WorkflowUiController {
 
     @GetMapping("/stats")
     public Map<String, Long> stats() {
+        java.time.LocalDateTime now = java.time.LocalDateTime.now();
         Map<String, Long> result = new LinkedHashMap<>();
-        for (WorkflowState state : WorkflowState.values()) {
-            result.put(state.name(), workflowRepository.countByState(state));
-        }
-        // RUNNING is a transient runtime view, not a DB state — surface it here so
-        // the UI can show it as a separate stat card without an extra request.
-        result.put("RUNNING", (long) runtimeRegistry.ids().size());
+        result.put("NEW",      workflowRepository.countByState(WorkflowState.NEW));
+        result.put("IN_QUEUE", workflowRepository.countQueued(now));
+        result.put("WAITING",  workflowRepository.countWaiting(now));
+        result.put("STOPPED",  workflowRepository.countByState(WorkflowState.STOPPED));
+        result.put("FINISHED", workflowRepository.countByState(WorkflowState.FINISHED));
+        result.put("FAILED",   workflowRepository.countByState(WorkflowState.FAILED));
         return result;
     }
 
@@ -81,13 +83,18 @@ public class WorkflowUiController {
 
     /**
      * Paged workflow list. Filtering supports multiple states via repeated query
-     * params: {@code ?state=NEW&state=RUNNABLE} or comma-separated {@code ?state=NEW,RUNNABLE}.
+     * params: {@code ?state=NEW&state=RETRY} or comma-separated {@code ?state=NEW,RETRY}.
+     * Two virtual filter values are also accepted:
+     * <ul>
+     *   <li>{@code IN_QUEUE} — NEW + RETRY where nextRetryAt &lt;= now (ready for pickup)</li>
+     *   <li>{@code WAITING}  — RETRY where nextRetryAt &gt; now (sleeping)</li>
+     * </ul>
      * Sorting via {@code ?sort=field,dir} (e.g. {@code sort=createdAt,desc}); default is
      * {@code id,desc}.
      */
     @GetMapping("/workflows")
     public Page<WorkflowEntity> workflows(
-            @RequestParam(name = "state", required = false) List<WorkflowState> states,
+            @RequestParam(name = "state", required = false) List<String> states,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(defaultValue = "id,desc") String sort) {
@@ -95,10 +102,19 @@ public class WorkflowUiController {
         if (states == null || states.isEmpty()) {
             return workflowRepository.findAll(pageable);
         }
+        // Handle virtual filter values — single-state only (UI never mixes these with others)
         if (states.size() == 1) {
-            return workflowRepository.findByState(states.get(0), pageable);
+            java.time.LocalDateTime now = java.time.LocalDateTime.now();
+            if ("IN_QUEUE".equals(states.get(0))) return workflowRepository.findInQueue(now, pageable);
+            if ("WAITING".equals(states.get(0)))  return workflowRepository.findWaiting(now, pageable);
         }
-        return workflowRepository.findByStateIn(states, pageable);
+        List<WorkflowState> dbStates = states.stream()
+                .filter(s -> !s.equals("IN_QUEUE") && !s.equals("WAITING"))
+                .map(WorkflowState::valueOf)
+                .toList();
+        if (dbStates.isEmpty())      return workflowRepository.findAll(pageable);
+        if (dbStates.size() == 1)    return workflowRepository.findByState(dbStates.get(0), pageable);
+        return workflowRepository.findByStateIn(dbStates, pageable);
     }
 
     /** Parses {@code field,dir} → {@link Sort}; falls back to {@code id,desc} on bad input. */

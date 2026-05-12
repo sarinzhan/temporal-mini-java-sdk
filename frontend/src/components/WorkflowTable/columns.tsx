@@ -1,6 +1,6 @@
 import { Chip } from '@mui/material';
 import type { ColumnDef } from '@tanstack/react-table';
-import type { Workflow, RuntimeMap } from '../../types/workflow';
+import type { Workflow } from '../../types/workflow';
 import type { LastActivity } from '../../types/activity';
 import { StatusBadge } from '../StatusBadge/StatusBadge';
 import { NextRunCell } from './NextRunCell';
@@ -20,7 +20,6 @@ export const SORTABLE_COLUMNS = new Set(['id', 'createdAt', 'state']);
  * relative timestamps; absolute values are shown in tooltips on hover.
  */
 export function buildWorkflowColumns(
-  runtime: RuntimeMap,
   lastActs: Record<number, LastActivity>,
 ): ColumnDef<Workflow>[] {
   return [
@@ -37,11 +36,7 @@ export function buildWorkflowColumns(
     {
       accessorKey: 'state',
       header: 'State',
-      cell: (ctx) => {
-        const wf = ctx.row.original;
-        const isRunning = runtime[wf.id] != null;
-        return <StatusBadge state={isRunning ? 'RUNNING' : wf.state} />;
-      },
+      cell: (ctx) => <StatusBadge state={ctx.row.original.state} />,
     },
     {
       accessorKey: 'createdAt',
@@ -57,7 +52,6 @@ export function buildWorkflowColumns(
         return (
           <LastRunCell
             workflow={wf}
-            runningSince={runtime[wf.id] ?? null}
             lastAttemptAt={last?.lastAttemptAt ?? null}
           />
         );
@@ -66,11 +60,7 @@ export function buildWorkflowColumns(
     {
       id: 'nextRun',
       header: 'Next run',
-      cell: (ctx) => {
-        const wf = ctx.row.original;
-        const since = runtime[wf.id] ?? null;
-        return <NextRunCell workflow={wf} runningSince={since} />;
-      },
+      cell: (ctx) => <NextRunCell workflow={ctx.row.original} />,
     },
     {
       id: 'lastActivity',

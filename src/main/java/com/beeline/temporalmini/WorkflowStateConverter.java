@@ -23,6 +23,9 @@ public class WorkflowStateConverter implements AttributeConverter<WorkflowState,
     @Override
     public WorkflowState convertToEntityAttribute(String dbData) {
         if (dbData == null) return null;
-        return "BLOCKED".equals(dbData) ? WorkflowState.STOPPED : WorkflowState.valueOf(dbData);
+        if ("BLOCKED".equals(dbData)) return WorkflowState.STOPPED;
+        // legacy rows that were persisted as RUNNABLE before the RETRY rename
+        if ("RUNNABLE".equals(dbData)) return WorkflowState.RETRY;
+        return WorkflowState.valueOf(dbData);
     }
 }

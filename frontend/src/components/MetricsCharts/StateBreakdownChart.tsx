@@ -7,15 +7,15 @@ import { sampleTime } from './chartUtils';
 
 const STORAGE_KEY = 'temporal-mini.metrics.stateChartStates';
 
-const ALL_STATES = ['NEW', 'RUNNABLE', 'STOPPED', 'FINISHED', 'FAILED'] as const;
+const ALL_STATES = ['NEW', 'RETRY', 'STOPPED', 'FINISHED', 'FAILED'] as const;
 type StateKey = typeof ALL_STATES[number];
 
 const FIELDS: Record<StateKey, keyof MetricSample> = {
-  NEW: 'cntNew',
-  RUNNABLE: 'cntRunnable',
-  STOPPED: 'cntBlocked',     // backend column kept the legacy name; same data
+  NEW:      'cntNew',
+  RETRY:    'cntRetry',
+  STOPPED:  'cntBlocked',
   FINISHED: 'cntFinished',
-  FAILED: 'cntFailed',
+  FAILED:   'cntFailed',
 };
 
 interface Props {
@@ -28,7 +28,7 @@ interface Props {
  * add/remove states from the chart. Selection is persisted in localStorage so
  * the next visit keeps the same view.
  *
- * <p>Defaults to {@code RUNNABLE / STOPPED / FAILED} — the actionable signal —
+ * <p>Defaults to {@code RETRY / STOPPED / FAILED} — the actionable signal —
  * and hides {@code NEW / FINISHED} which usually drown out everything else.
  */
 export function StateBreakdownChart({ samples, height = 280 }: Props) {
@@ -108,11 +108,11 @@ function Empty({ selected }: { selected: number }) {
 function readInitial(): StateKey[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return ['RUNNABLE', 'STOPPED', 'FAILED'];
+    if (!raw) return ['RETRY', 'STOPPED', 'FAILED'];
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed.filter((x): x is StateKey => (ALL_STATES as readonly string[]).includes(x));
     }
   } catch { /* ignore */ }
-  return ['RUNNABLE', 'STOPPED', 'FAILED'];
+  return ['RETRY', 'STOPPED', 'FAILED'];
 }

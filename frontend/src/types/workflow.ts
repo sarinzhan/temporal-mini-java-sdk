@@ -1,15 +1,16 @@
-/**
- * Persisted lifecycle states. "RUNNING" is intentionally NOT persisted — it's a
- * runtime view served separately via /runtime, but it's a useful display state.
- */
+/** Persisted lifecycle states — match the backend WorkflowState enum exactly. */
 export type DbWorkflowState =
   | 'NEW'
-  | 'RUNNABLE'
+  | 'RETRY'
   | 'STOPPED'
   | 'FINISHED'
   | 'FAILED';
 
-export type VisualWorkflowState = DbWorkflowState | 'RUNNING';
+/**
+ * Visual states shown in the UI. IN_QUEUE and WAITING are derived server-side
+ * from RETRY rows split by nextRetryAt; they are not persisted enum values.
+ */
+export type VisualWorkflowState = DbWorkflowState | 'IN_QUEUE' | 'WAITING';
 
 /** Alias for ergonomics — matches the persisted enum on the backend. */
 export type WorkflowState = DbWorkflowState;

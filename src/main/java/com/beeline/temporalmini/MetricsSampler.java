@@ -62,7 +62,7 @@ public class MetricsSampler {
         s.setPoolQueue(tp.getQueue().size());
         s.setRuntimeCount(runtimeRegistry.ids().size());
         s.setCntNew(workflowRepository.countByState(WorkflowState.NEW));
-        s.setCntRunnable(workflowRepository.countByState(WorkflowState.RUNNABLE));
+        s.setCntRetry(workflowRepository.countByState(WorkflowState.RETRY));
         s.setCntBlocked(workflowRepository.countByState(WorkflowState.STOPPED));
         s.setCntFinished(workflowRepository.countByState(WorkflowState.FINISHED));
         s.setCntFailed(workflowRepository.countByState(WorkflowState.FAILED));

@@ -3,18 +3,23 @@ package com.beeline.temporalmini;
 /**
  * Persisted workflow lifecycle states.
  *
- * <p>Note: there is no {@code RUNNING} value here on purpose. "Running" — meaning the
- * engine is actively executing the workflow at this moment — is tracked in memory by
- * {@link WorkflowRuntimeRegistry}, not in the database. {@code RUNNABLE} covers both
- * "queued for next run" and "currently being executed". The runtime registry is the
- * source of truth for the latter and is exposed through the UI as a separate badge.
+ * <pre>
+ *  NEW ──► (scheduler picks up) ──► FINISHED
+ *                                 ──► RETRY ──► (next attempt) ──► FINISHED
+ *                                 │             └──────────────────► FAILED
+ *                                 └──────────────────────────────── STOPPED
+ * </pre>
+ *
+ * <p>{@code NEW} — workflow was just created, has never been executed.
+ * <p>{@code RETRY} — a previous attempt failed with a retriable error; will be picked up
+ * again when {@code nextRetryAt <= now}. While {@code nextRetryAt} is still in the future
+ * the workflow is "waiting"; once the time passes it is "queued" for the next run.
+ * "Currently executing" is not a persisted state — {@link WorkflowRuntimeRegistry} tracks
+ * in-flight execution in memory and exposes it as the {@code running} metric.
  *
  * <p>{@code STOPPED} replaced the historical {@code BLOCKED} value at the API/UI level.
- * The database column still stores the string {@code "BLOCKED"} — see
- * {@link WorkflowStateConverter} — to avoid a destructive data migration on existing
- * deployments. The two are aliases: STOPPED is the user-facing name, BLOCKED is what
- * lives on disk.
+ * The database column still stores {@code "BLOCKED"} — see {@link WorkflowStateConverter}.
  */
 public enum WorkflowState {
-    NEW, RUNNABLE, STOPPED, FINISHED, FAILED
+    NEW, RETRY, STOPPED, FINISHED, FAILED
 }

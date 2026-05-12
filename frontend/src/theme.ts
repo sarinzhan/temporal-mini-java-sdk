@@ -6,8 +6,9 @@ import { createTheme } from '@mui/material/styles';
  */
 export const statusColors: Record<string, string> = {
   NEW:      '#6c8eff',
-  RUNNABLE: '#0ea5e9',
-  RUNNING:  '#f59e0b',
+  IN_QUEUE: '#0ea5e9',
+  WAITING:  '#94a3b8',
+  RETRY:    '#f59e0b',
   STOPPED:  '#8b5cf6',
   FINISHED: '#3ecf8e',
   FAILED:   '#f87171',

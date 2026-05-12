@@ -21,13 +21,12 @@ import {
   TableSortLabel,
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
-import type { RuntimeMap, Workflow, WorkflowPage } from '../../types/workflow';
+import type { Workflow, WorkflowPage } from '../../types/workflow';
 import type { LastActivity } from '../../types/activity';
 import { buildWorkflowColumns, SORTABLE_COLUMNS } from './columns';
 
 interface Props {
   data?: WorkflowPage;
-  runtime: RuntimeMap;
   lastActivities: Record<number, LastActivity>;
   page: number;
   pageSize: number;
@@ -41,7 +40,7 @@ interface Props {
 }
 
 export function WorkflowTable({
-  data, runtime, lastActivities, page, pageSize, pageSizeOptions, sorting, rowSelection,
+  data, lastActivities, page, pageSize, pageSizeOptions, sorting, rowSelection,
   onPageChange, onPageSizeChange, onSortingChange, onRowSelectionChange,
 }: Props) {
   const navigate = useNavigate();
@@ -67,8 +66,8 @@ export function WorkflowTable({
         />
       ),
     },
-    ...buildWorkflowColumns(runtime, lastActivities),
-  ], [runtime, lastActivities]);
+    ...buildWorkflowColumns(lastActivities),
+  ], [lastActivities]);
 
   const table = useReactTable({
     data: data?.content ?? [],
