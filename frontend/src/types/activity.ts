@@ -14,4 +14,5 @@ export interface Activity {
 export interface LastActivity {
   name: string;
   attempt: number;
+  lastAttemptAt: string | number[] | null;
 }

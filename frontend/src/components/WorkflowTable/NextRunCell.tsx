@@ -31,7 +31,7 @@ export function NextRunCell({ workflow, runningSince }: Props) {
   if (workflow.state === 'FINISHED' || workflow.state === 'FAILED') {
     return <Typography variant="caption" sx={{ color: 'text.disabled' }}>—</Typography>;
   }
-  if (workflow.state === 'BLOCKED') {
+  if (workflow.state === 'STOPPED') {
     return <Typography variant="caption" sx={{ color: 'text.disabled' }}>paused</Typography>;
   }
   if (!workflow.nextRetryAt) {

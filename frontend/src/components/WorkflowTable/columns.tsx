@@ -4,11 +4,20 @@ import type { Workflow, RuntimeMap } from '../../types/workflow';
 import type { LastActivity } from '../../types/activity';
 import { StatusBadge } from '../StatusBadge/StatusBadge';
 import { NextRunCell } from './NextRunCell';
-import { fmtDate } from '../../utils/format';
+import { RelativeTime } from '../RelativeTime/RelativeTime';
+import { LastRunCell } from './LastRunCell';
 
 /**
- * Column definitions for the workflow list. Keeping the row schema split out
- * here so {@code WorkflowTable} stays a thin shell over TanStack Table.
+ * Backend allow-list (mirrors {@code WorkflowUiController.SORTABLE_FIELDS}).
+ * Headers in this set become clickable {@code <TableSortLabel>}s; the rest are
+ * plain labels. Keeping the column ids identical to backend field names lets
+ * us pass the sort state through unchanged.
+ */
+export const SORTABLE_COLUMNS = new Set(['id', 'createdAt', 'state']);
+
+/**
+ * Column definitions for the workflow list. Time fields render as auto-updating
+ * relative timestamps; absolute values are shown in tooltips on hover.
  */
 export function buildWorkflowColumns(
   runtime: RuntimeMap,
@@ -37,12 +46,22 @@ export function buildWorkflowColumns(
     {
       accessorKey: 'createdAt',
       header: 'Created',
-      cell: (ctx) => <span style={{ color: '#6b7280', fontSize: 12 }}>{fmtDate(ctx.getValue() as Workflow['createdAt'])}</span>,
+      cell: (ctx) => <RelativeTime value={ctx.getValue() as Workflow['createdAt']} />,
     },
     {
-      accessorKey: 'startedAt',
-      header: 'Started',
-      cell: (ctx) => <span style={{ color: '#6b7280', fontSize: 12 }}>{fmtDate(ctx.getValue() as Workflow['startedAt'])}</span>,
+      id: 'lastRun',
+      header: 'Last run',
+      cell: (ctx) => {
+        const wf = ctx.row.original;
+        const last = lastActs[wf.id];
+        return (
+          <LastRunCell
+            workflow={wf}
+            runningSince={runtime[wf.id] ?? null}
+            lastAttemptAt={last?.lastAttemptAt ?? null}
+          />
+        );
+      },
     },
     {
       id: 'nextRun',
@@ -55,16 +74,28 @@ export function buildWorkflowColumns(
     },
     {
       id: 'lastActivity',
-      header: 'Current activity',
+      header: 'Activity',
       cell: (ctx) => {
         const last = lastActs[ctx.row.original.id];
         if (!last) return <span style={{ color: '#9ca3af' }}>—</span>;
         return (
-          <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', fontFamily: 'SFMono-Regular, Consolas, monospace', fontSize: 12, color: '#4b5563' }}>
+          <span style={{
+            fontFamily: 'SFMono-Regular, Consolas, monospace',
+            fontSize: 12,
+            color: '#4b5563',
+          }}>
             {last.name}
-            <Chip size="small" label={`#${last.attempt}`} variant="outlined" />
           </span>
         );
+      },
+    },
+    {
+      id: 'attempts',
+      header: 'Attempts',
+      cell: (ctx) => {
+        const last = lastActs[ctx.row.original.id];
+        if (!last) return <span style={{ color: '#9ca3af' }}>—</span>;
+        return <Chip size="small" label={`#${last.attempt}`} variant="outlined" />;
       },
     },
     {
@@ -81,6 +112,7 @@ export function buildWorkflowColumns(
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
+            fontSize: 12,
           }} title={v}>{v}</span>
         );
       },

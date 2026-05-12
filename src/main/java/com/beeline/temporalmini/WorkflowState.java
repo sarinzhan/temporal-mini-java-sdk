@@ -8,7 +8,13 @@ package com.beeline.temporalmini;
  * {@link WorkflowRuntimeRegistry}, not in the database. {@code RUNNABLE} covers both
  * "queued for next run" and "currently being executed". The runtime registry is the
  * source of truth for the latter and is exposed through the UI as a separate badge.
+ *
+ * <p>{@code STOPPED} replaced the historical {@code BLOCKED} value at the API/UI level.
+ * The database column still stores the string {@code "BLOCKED"} — see
+ * {@link WorkflowStateConverter} — to avoid a destructive data migration on existing
+ * deployments. The two are aliases: STOPPED is the user-facing name, BLOCKED is what
+ * lives on disk.
  */
 public enum WorkflowState {
-    NEW, RUNNABLE, BLOCKED, FINISHED, FAILED
+    NEW, RUNNABLE, STOPPED, FINISHED, FAILED
 }

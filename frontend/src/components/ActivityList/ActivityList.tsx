@@ -4,6 +4,7 @@ import type { Activity } from '../../types/activity';
 import { ActivityGroup } from './ActivityGroup';
 
 interface Props {
+  workflowId: number;
   activities: Activity[];
 }
 
@@ -11,7 +12,7 @@ interface Props {
  * Groups attempts by activity name (so retries collapse under a single header)
  * and orders attempts within a group by attempt number.
  */
-export function ActivityList({ activities }: Props) {
+export function ActivityList({ workflowId, activities }: Props) {
   const groups = useMemo(() => {
     const map = new Map<string, Activity[]>();
     for (const a of activities) {
@@ -34,7 +35,7 @@ export function ActivityList({ activities }: Props) {
   return (
     <Box>
       {[...groups.entries()].map(([name, items]) => (
-        <ActivityGroup key={name} name={name} attempts={items} />
+        <ActivityGroup key={name} workflowId={workflowId} name={name} attempts={items} />
       ))}
     </Box>
   );

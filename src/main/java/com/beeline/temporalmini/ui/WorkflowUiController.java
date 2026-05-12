@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.*;
 import java.util.*;
 import java.util.concurrent.ThreadPoolExecutor;
 
+// (sort whitelist lives below — keeps the import block tidy)
+
 @RestController
 @RequestMapping("/temporal-mini/api")
 public class WorkflowUiController {
@@ -72,15 +74,24 @@ public class WorkflowUiController {
     }
 
     /**
+     * Allow-list of fields the client may sort on. Anything else falls back to {@code id}.
+     * The list is intentionally narrow — the table only exposes these columns as sortable.
+     */
+    private static final Set<String> SORTABLE_FIELDS = Set.of("id", "createdAt", "startedAt", "state");
+
+    /**
      * Paged workflow list. Filtering supports multiple states via repeated query
      * params: {@code ?state=NEW&state=RUNNABLE} or comma-separated {@code ?state=NEW,RUNNABLE}.
+     * Sorting via {@code ?sort=field,dir} (e.g. {@code sort=createdAt,desc}); default is
+     * {@code id,desc}.
      */
     @GetMapping("/workflows")
     public Page<WorkflowEntity> workflows(
             @RequestParam(name = "state", required = false) List<WorkflowState> states,
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
-        Pageable pageable = PageRequest.of(page, size, Sort.by("id").descending());
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(defaultValue = "id,desc") String sort) {
+        Pageable pageable = PageRequest.of(page, size, parseSort(sort));
         if (states == null || states.isEmpty()) {
             return workflowRepository.findAll(pageable);
         }
@@ -88,6 +99,16 @@ public class WorkflowUiController {
             return workflowRepository.findByState(states.get(0), pageable);
         }
         return workflowRepository.findByStateIn(states, pageable);
+    }
+
+    /** Parses {@code field,dir} → {@link Sort}; falls back to {@code id,desc} on bad input. */
+    private static Sort parseSort(String raw) {
+        if (raw == null || raw.isBlank()) return Sort.by(Sort.Direction.DESC, "id");
+        String[] parts = raw.split(",", 2);
+        String field = SORTABLE_FIELDS.contains(parts[0]) ? parts[0] : "id";
+        Sort.Direction dir = (parts.length > 1 && "asc".equalsIgnoreCase(parts[1].trim()))
+                ? Sort.Direction.ASC : Sort.Direction.DESC;
+        return Sort.by(dir, field);
     }
 
     @GetMapping("/workflows/{id}")
@@ -100,13 +121,22 @@ public class WorkflowUiController {
         return activityRepository.findByWorkflowIdOrderByStartedAt(id);
     }
 
-    /** Returns {workflowId: {name, attempt}} for the latest activity of each given workflow. */
+    /**
+     * Returns {workflowId: {name, attempt, lastAttemptAt}} for the latest activity of
+     * each given workflow. {@code attempt} is the attempt number of the latest row,
+     * which equals the total attempts the engine has made for that activity name
+     * (every retry inserts a new row with attempt = previous + 1).
+     */
     @GetMapping("/last-activities")
     public Map<Long, Map<String, Object>> lastActivities(@RequestParam("ids") List<Long> ids) {
         if (ids == null || ids.isEmpty()) return Map.of();
         Map<Long, Map<String, Object>> result = new LinkedHashMap<>();
         for (Activity a : activityRepository.findLatestActivities(ids)) {
-            result.put(a.getWorkflowId(), Map.of("name", a.getName(), "attempt", a.getAttempt()));
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("name", a.getName());
+            data.put("attempt", a.getAttempt());
+            data.put("lastAttemptAt", a.getStartedAt());
+            result.put(a.getWorkflowId(), data);
         }
         return result;
     }
@@ -121,23 +151,122 @@ public class WorkflowUiController {
         }
     }
 
-    @PostMapping("/workflows/{id}/block")
-    public ResponseEntity<?> block(@PathVariable Long id) {
+    @PostMapping("/workflows/{id}/stop")
+    public ResponseEntity<?> stop(@PathVariable Long id) {
         try {
-            workflowEngine.block(id);
+            workflowEngine.stop(id);
             return ResponseEntity.ok(Map.of("status", "ok"));
         } catch (IllegalStateException ex) {
             return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
         }
     }
 
-    @PostMapping("/workflows/{id}/unblock")
-    public ResponseEntity<?> unblock(@PathVariable Long id) {
+    @PostMapping("/workflows/{id}/resume")
+    public ResponseEntity<?> resume(@PathVariable Long id) {
         try {
-            workflowEngine.unblock(id);
+            workflowEngine.resume(id);
             return ResponseEntity.ok(Map.of("status", "ok"));
         } catch (IllegalStateException ex) {
             return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
         }
+    }
+
+    @PostMapping("/workflows/{id}/restart")
+    public ResponseEntity<?> restart(@PathVariable Long id) {
+        try {
+            workflowEngine.restart(id);
+            return ResponseEntity.ok(Map.of("status", "ok"));
+        } catch (IllegalStateException | IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
+        }
+    }
+
+    public record RestartFromActivityRequest(Long activityId) {}
+
+    @PostMapping("/workflows/{id}/restart-from-activity")
+    public ResponseEntity<?> restartFromActivity(@PathVariable Long id,
+                                                 @org.springframework.web.bind.annotation.RequestBody RestartFromActivityRequest body) {
+        try {
+            workflowEngine.restartFromActivity(id, body.activityId());
+            return ResponseEntity.ok(Map.of("status", "ok"));
+        } catch (IllegalStateException | IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
+        }
+    }
+
+    /**
+     * Bulk action body. Either {@code ids} OR a {@code from/to} window is required;
+     * {@code states} is an optional filter applied to the time window.
+     */
+    public record BulkRequest(List<Long> ids,
+                              java.time.LocalDateTime from,
+                              java.time.LocalDateTime to,
+                              List<WorkflowState> states) {}
+
+    public record BulkResponse(int affected) {}
+
+    @PostMapping("/workflows/bulk/stop")
+    public BulkResponse bulkStop(@org.springframework.web.bind.annotation.RequestBody BulkRequest body) {
+        return new BulkResponse(workflowEngine.stopAll(resolveIds(body)));
+    }
+
+    @PostMapping("/workflows/bulk/resume")
+    public BulkResponse bulkResume(@org.springframework.web.bind.annotation.RequestBody BulkRequest body) {
+        return new BulkResponse(workflowEngine.resumeAll(resolveIds(body)));
+    }
+
+    @PostMapping("/workflows/bulk/restart")
+    public BulkResponse bulkRestart(@org.springframework.web.bind.annotation.RequestBody BulkRequest body) {
+        return new BulkResponse(workflowEngine.restartAll(resolveIds(body)));
+    }
+
+    @PostMapping("/workflows/bulk/run-now")
+    public BulkResponse bulkRunNow(@org.springframework.web.bind.annotation.RequestBody BulkRequest body) {
+        return new BulkResponse(workflowEngine.runNowAll(resolveIds(body)));
+    }
+
+    public record PayloadRequest(String payload) {}
+
+    /** Update the workflow's input payload (allowed in NEW/STOPPED/FAILED). */
+    @PutMapping("/workflows/{id}/payload")
+    public ResponseEntity<?> setPayload(@PathVariable Long id,
+                                        @RequestBody PayloadRequest body) {
+        try {
+            workflowEngine.setPayload(id, body.payload());
+            return ResponseEntity.ok(Map.of("status", "ok"));
+        } catch (IllegalStateException | IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
+        }
+    }
+
+    @PutMapping("/workflows/{id}/activities/{activityId}/input")
+    public ResponseEntity<?> setActivityInput(@PathVariable Long id, @PathVariable Long activityId,
+                                              @RequestBody PayloadRequest body) {
+        try {
+            workflowEngine.setActivityPayload(id, activityId, body.payload(), false);
+            return ResponseEntity.ok(Map.of("status", "ok"));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
+        }
+    }
+
+    @PutMapping("/workflows/{id}/activities/{activityId}/output")
+    public ResponseEntity<?> setActivityOutput(@PathVariable Long id, @PathVariable Long activityId,
+                                               @RequestBody PayloadRequest body) {
+        try {
+            workflowEngine.setActivityPayload(id, activityId, body.payload(), true);
+            return ResponseEntity.ok(Map.of("status", "ok"));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
+        }
+    }
+
+    /** Either explicit ids or a creation-time window with optional state filter. */
+    private List<Long> resolveIds(BulkRequest body) {
+        if (body.ids() != null && !body.ids().isEmpty()) return body.ids();
+        if (body.from() != null && body.to() != null) {
+            return workflowRepository.findIdsByCreatedAtRange(body.from(), body.to(), body.states());
+        }
+        return List.of();
     }
 }

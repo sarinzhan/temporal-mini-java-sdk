@@ -3,7 +3,7 @@ import { Box } from '@mui/material';
 import { StatCard } from './StatCard';
 import type { StatsByState, VisualWorkflowState } from '../../types/workflow';
 
-const ORDER: VisualWorkflowState[] = ['NEW', 'RUNNABLE', 'RUNNING', 'BLOCKED', 'FINISHED', 'FAILED'];
+const ORDER: VisualWorkflowState[] = ['NEW', 'RUNNABLE', 'RUNNING', 'STOPPED', 'FINISHED', 'FAILED'];
 
 interface Props {
   stats?: StatsByState;

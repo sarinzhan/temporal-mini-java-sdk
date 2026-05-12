@@ -8,7 +8,7 @@ export const statusColors: Record<string, string> = {
   NEW:      '#6c8eff',
   RUNNABLE: '#0ea5e9',
   RUNNING:  '#f59e0b',
-  BLOCKED:  '#8b5cf6',
+  STOPPED:  '#8b5cf6',
   FINISHED: '#3ecf8e',
   FAILED:   '#f87171',
 };

@@ -1,9 +1,13 @@
 package com.beeline.temporalmini;
 
+import com.beeline.temporalmini.metrics.ActivityMetrics;
+import com.beeline.temporalmini.metrics.WorkflowMetrics;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -15,20 +19,33 @@ import java.util.stream.Collectors;
 public class WorkflowEngine {
 
     private static final Set<WorkflowState> RUN_NOW_FORBIDDEN = EnumSet.of(WorkflowState.FINISHED);
-    private static final Set<WorkflowState> BLOCKABLE = EnumSet.of(WorkflowState.NEW, WorkflowState.RUNNABLE);
-    private static final Set<WorkflowState> UNBLOCKABLE = EnumSet.of(WorkflowState.BLOCKED);
+    private static final Set<WorkflowState> STOPPABLE   = EnumSet.of(WorkflowState.NEW, WorkflowState.RUNNABLE);
+    private static final Set<WorkflowState> RESUMABLE   = EnumSet.of(WorkflowState.STOPPED, WorkflowState.FAILED);
 
     private final Map<String, Workflow> registry;
     private final WorkflowRepository workflowRepository;
     private final ActivityRepository activityRepository;
     private final ObjectMapper objectMapper;
+    private final ActivityMetrics activityMetrics;
+    private final WorkflowMetrics workflowMetrics;
 
     public WorkflowEngine(List<Workflow> workflows, WorkflowRepository workflowRepository,
-                          ActivityRepository activityRepository, ObjectMapper objectMapper) {
+                          ActivityRepository activityRepository, ObjectMapper objectMapper,
+                          ActivityMetrics activityMetrics, WorkflowMetrics workflowMetrics) {
         this.registry = workflows.stream().collect(Collectors.toMap(Workflow::type, Function.identity()));
         this.workflowRepository = workflowRepository;
         this.activityRepository = activityRepository;
         this.objectMapper = objectMapper;
+        this.activityMetrics = activityMetrics;
+        this.workflowMetrics = workflowMetrics;
+    }
+
+    private void recordRun(String workflowType, Workflow workflow, WorkflowContext ctx) throws Exception {
+        if (workflowMetrics == null) {
+            workflow.run(ctx);
+            return;
+        }
+        workflowMetrics.record(workflowType, () -> { workflow.run(ctx); return null; });
     }
 
     public Long start(String workflowType, String initialPayload) {
@@ -54,8 +71,8 @@ public class WorkflowEngine {
      */
     public void run(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
-        if (entity.getState() == WorkflowState.BLOCKED) {
-            log.debug("[{}:{}] skipped — BLOCKED", entity.getWorkflowType(), workflowId);
+        if (entity.getState() == WorkflowState.STOPPED) {
+            log.debug("[{}:{}] skipped — STOPPED", entity.getWorkflowType(), workflowId);
             return;
         }
         entity.setState(WorkflowState.RUNNABLE);
@@ -65,10 +82,10 @@ public class WorkflowEngine {
         entity.setNextRetryAt(null);
 
         Workflow workflow = registry.get(entity.getWorkflowType());
-        WorkflowContext ctx = new WorkflowContext(entity, activityRepository, objectMapper);
+        WorkflowContext ctx = new WorkflowContext(entity, activityRepository, objectMapper, activityMetrics);
         log.info("[{}:{}] running", entity.getWorkflowType(), workflowId);
         try {
-            workflow.run(ctx);
+            recordRun(entity.getWorkflowType(), workflow, ctx);
             entity.setState(WorkflowState.FINISHED);
             log.info("[{}:{}] FINISHED", entity.getWorkflowType(), workflowId);
         } catch (ActivityException ex) {
@@ -91,7 +108,7 @@ public class WorkflowEngine {
 
     /**
      * Schedule the workflow to be picked up by the scheduler immediately.
-     * Allowed for any non-FINISHED state. FAILED and BLOCKED workflows are
+     * Allowed for any non-FINISHED state. FAILED and STOPPED workflows are
      * reset to RUNNABLE so the scheduler will pick them up.
      */
     public void runNow(Long workflowId) {
@@ -101,7 +118,7 @@ public class WorkflowEngine {
                     "Cannot run workflow in state " + entity.getState() + " — already finished");
         }
         entity.setNextRetryAt(LocalDateTime.now());
-        if (entity.getState() == WorkflowState.FAILED || entity.getState() == WorkflowState.BLOCKED) {
+        if (entity.getState() == WorkflowState.FAILED || entity.getState() == WorkflowState.STOPPED) {
             entity.setState(WorkflowState.RUNNABLE);
             entity.setErrorMessage(null);
         }
@@ -109,27 +126,145 @@ public class WorkflowEngine {
         log.info("[{}:{}] forced run-now", entity.getWorkflowType(), workflowId);
     }
 
-    /** Move workflow to BLOCKED so the scheduler stops picking it up. */
-    public void block(Long workflowId) {
+    /** Move workflow to STOPPED so the scheduler stops picking it up. */
+    public void stop(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
-        if (!BLOCKABLE.contains(entity.getState())) {
+        if (!STOPPABLE.contains(entity.getState())) {
             throw new IllegalStateException(
-                    "Cannot block workflow in state " + entity.getState());
+                    "Cannot stop workflow in state " + entity.getState());
         }
-        entity.setState(WorkflowState.BLOCKED);
+        entity.setState(WorkflowState.STOPPED);
         workflowRepository.save(entity);
-        log.info("[{}:{}] BLOCKED", entity.getWorkflowType(), workflowId);
+        log.info("[{}:{}] STOPPED", entity.getWorkflowType(), workflowId);
     }
 
-    /** Resume a BLOCKED workflow — moves to RUNNABLE so the scheduler resumes it. */
-    public void unblock(Long workflowId) {
+    /** Resume a STOPPED or FAILED workflow — moves to RUNNABLE so the scheduler resumes it. */
+    public void resume(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
-        if (!UNBLOCKABLE.contains(entity.getState())) {
+        if (!RESUMABLE.contains(entity.getState())) {
             throw new IllegalStateException(
-                    "Cannot unblock workflow in state " + entity.getState() + " — only BLOCKED is allowed");
+                    "Cannot resume workflow in state " + entity.getState() + " — only STOPPED/FAILED allowed");
         }
         entity.setState(WorkflowState.RUNNABLE);
+        entity.setErrorMessage(null);
+        entity.setNextRetryAt(LocalDateTime.now());
         workflowRepository.save(entity);
-        log.info("[{}:{}] UNBLOCKED", entity.getWorkflowType(), workflowId);
+        log.info("[{}:{}] RESUMED", entity.getWorkflowType(), workflowId);
+    }
+
+    /**
+     * Restart from scratch: wipe all activity rows so the next replay re-executes every
+     * step. Reset state to RUNNABLE, clear started/error/retry-at, schedule for immediate
+     * pickup. Allowed in any state — operators use this to retry a dead workflow.
+     *
+     * <p>This is destructive: per-attempt history for this workflow is permanently gone.
+     * Callers in the UI should confirm before invoking.
+     */
+    @Transactional
+    public void restart(Long workflowId) {
+        WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
+        activityRepository.deleteByWorkflowId(workflowId);
+        entity.setState(WorkflowState.RUNNABLE);
+        entity.setStartedAt(null);
+        entity.setErrorMessage(null);
+        entity.setNextRetryAt(LocalDateTime.now());
+        workflowRepository.save(entity);
+        log.info("[{}:{}] RESTART (full)", entity.getWorkflowType(), workflowId);
+    }
+
+    /**
+     * Restart starting from a specific activity — every activity row whose
+     * {@code startedAt >= chosen.startedAt} is deleted, the workflow is reset to RUNNABLE
+     * and queued for immediate pickup. Earlier activities remain in the cache so replay
+     * skips over them.
+     */
+    @Transactional
+    public void restartFromActivity(Long workflowId, Long activityId) {
+        WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
+        Activity pivot = activityRepository.findById(activityId)
+                .orElseThrow(() -> new IllegalArgumentException("Activity not found: " + activityId));
+        if (!pivot.getWorkflowId().equals(workflowId)) {
+            throw new IllegalArgumentException("Activity " + activityId + " does not belong to workflow " + workflowId);
+        }
+        if (pivot.getStartedAt() == null) {
+            throw new IllegalStateException("Activity has no startedAt — cannot pivot here");
+        }
+        int deleted = activityRepository.deleteByWorkflowIdAndStartedAtGreaterThanEqual(
+                workflowId, pivot.getStartedAt());
+        entity.setState(WorkflowState.RUNNABLE);
+        entity.setErrorMessage(null);
+        entity.setNextRetryAt(LocalDateTime.now());
+        workflowRepository.save(entity);
+        log.info("[{}:{}] RESTART from activity {} ({}) — {} attempts wiped",
+                entity.getWorkflowType(), workflowId, pivot.getName(), pivot.getAttempt(), deleted);
+    }
+
+    // ── Bulk helpers — return number of workflows successfully transitioned. Skips,
+    //    rather than fails, on illegal transitions so a single bad row in a wide
+    //    selection doesn't poison the whole operation. ────────────────────────────
+
+    public int stopAll(Collection<Long> ids) {
+        return forEachSilently(ids, this::stop);
+    }
+
+    public int resumeAll(Collection<Long> ids) {
+        return forEachSilently(ids, this::resume);
+    }
+
+    public int restartAll(Collection<Long> ids) {
+        return forEachSilently(ids, this::restart);
+    }
+
+    public int runNowAll(Collection<Long> ids) {
+        return forEachSilently(ids, this::runNow);
+    }
+
+    /**
+     * Replace the workflow's input payload. Allowed only in non-running, non-finished
+     * states — once the workflow has started executing, the cached activity outputs
+     * make the input largely irrelevant; once finished, editing it would be misleading.
+     */
+    private static final Set<WorkflowState> PAYLOAD_EDITABLE =
+            EnumSet.of(WorkflowState.NEW, WorkflowState.STOPPED, WorkflowState.FAILED);
+
+    public void setPayload(Long workflowId, String payload) {
+        WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
+        if (!PAYLOAD_EDITABLE.contains(entity.getState())) {
+            throw new IllegalStateException(
+                    "Cannot edit payload in state " + entity.getState() + " — only NEW/STOPPED/FAILED allowed");
+        }
+        entity.setNextPayload(payload);
+        workflowRepository.save(entity);
+        log.info("[{}:{}] payload edited", entity.getWorkflowType(), workflowId);
+    }
+
+    /**
+     * Replace an activity's input or output payload. No state check on the workflow —
+     * operators sometimes need to surgically rewrite history before a restart-from
+     * (e.g. fix a bad upstream payload that the workflow cached on a successful
+     * attempt). Caller takes responsibility.
+     */
+    public void setActivityPayload(Long workflowId, Long activityId, String payload, boolean output) {
+        Activity activity = activityRepository.findById(activityId)
+                .orElseThrow(() -> new IllegalArgumentException("Activity not found: " + activityId));
+        if (!activity.getWorkflowId().equals(workflowId)) {
+            throw new IllegalArgumentException("Activity " + activityId + " does not belong to workflow " + workflowId);
+        }
+        if (output) activity.setOutputPayload(payload);
+        else        activity.setInputPayload(payload);
+        activityRepository.save(activity);
+        log.info("[{}] activity {} ({}) {} payload edited",
+                workflowId, activityId, activity.getName(), output ? "output" : "input");
+    }
+
+    private int forEachSilently(Collection<Long> ids, java.util.function.LongConsumer action) {
+        int ok = 0;
+        for (Long id : ids) {
+            try { action.accept(id); ok++; }
+            catch (Exception ex) {
+                log.warn("bulk op skipped workflow {}: {}", id, ex.getMessage());
+            }
+        }
+        return ok;
     }
 }

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { authApi } from '../api/auth';
 import { ApiError } from '../api/client';
+import { baseUrl } from '../utils/baseUrl';
 import type { AuthUser, LoginRequest } from '../types/auth';
 
 interface ContextValue {
@@ -16,14 +17,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setLoading] = useState(true);
 
-  // On mount: check whether the session cookie maps to an authenticated user.
-  // Three outcomes:
+  // Re-check whoami whenever the active backend changes (initial mount + subsequent
+  // switches). Three outcomes:
   //  - 200 → logged in, store the user.
   //  - 401 → not logged in, redirect to /login (handled by ProtectedRoute).
   //  - 404 → auth is not enabled on the backend (workflow.ui.security.enabled=false);
   //          treat as an anonymous "always authenticated" session so the UI works.
-  useEffect(() => {
+  const recheck = useCallback(() => {
     let cancelled = false;
+    setLoading(true);
     authApi.me()
       .then((u) => { if (!cancelled) setUser(u); })
       .catch((e) => {
@@ -38,6 +40,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    const cleanup = recheck();
+    const unsub = baseUrl.subscribe(() => recheck());
+    return () => { cleanup(); unsub(); };
+  }, [recheck]);
 
   const login = useCallback(async (req: LoginRequest) => {
     const u = await authApi.login(req);

@@ -11,6 +11,6 @@ import org.springframework.web.servlet.DispatcherServlet;
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 @ConditionalOnClass(DispatcherServlet.class)
 @ConditionalOnProperty(name = "temporal-mini.ui.enabled", havingValue = "true", matchIfMissing = true)
-@Import({ WorkflowUiController.class, SpaController.class })
+@Import({ WorkflowUiController.class, MetricsController.class, SpaController.class, SpaResourceConfig.class, WorkflowUiBanner.class })
 public class TemporalMiniUiAutoConfiguration {
 }

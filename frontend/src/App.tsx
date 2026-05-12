@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { LoginPage } from './pages/LoginPage';
 import { WorkflowsPage } from './pages/WorkflowsPage';
 import { WorkflowDetailsPage } from './pages/WorkflowDetailsPage';
+import { MetricsPage } from './pages/MetricsPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
 export default function App() {
@@ -11,6 +12,7 @@ export default function App() {
       <Route element={<ProtectedRoute />}>
         <Route path="/workflows"     element={<WorkflowsPage />} />
         <Route path="/workflows/:id" element={<WorkflowDetailsPage />} />
+        <Route path="/metrics"       element={<MetricsPage />} />
         <Route path="*"              element={<Navigate to="/workflows" replace />} />
       </Route>
     </Routes>

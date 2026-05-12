@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.beeline</groupId>
     <artifactId>temporal-mini</artifactId>
-    <version>0.0.1</version>
+    <version>0.0.2</version>
     <name>temporal-mini-sdk</name>
     <description>Lightweight workflow engine — just two DB tables, no extra infrastructure</description>
 
@@ -47,19 +47,13 @@
             <optional>true</optional>
         </dependency>
         <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-database-postgresql</artifactId>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

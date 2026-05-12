@@ -3,9 +3,13 @@ import {
   flexRender,
   getCoreRowModel,
   useReactTable,
+  type ColumnDef,
+  type RowSelectionState,
+  type SortingState,
 } from '@tanstack/react-table';
 import {
   Box,
+  Checkbox,
   Paper,
   Table,
   TableBody,
@@ -14,11 +18,12 @@ import {
   TableHead,
   TablePagination,
   TableRow,
+  TableSortLabel,
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
-import type { RuntimeMap, WorkflowPage } from '../../types/workflow';
+import type { RuntimeMap, Workflow, WorkflowPage } from '../../types/workflow';
 import type { LastActivity } from '../../types/activity';
-import { buildWorkflowColumns } from './columns';
+import { buildWorkflowColumns, SORTABLE_COLUMNS } from './columns';
 
 interface Props {
   data?: WorkflowPage;
@@ -26,19 +31,56 @@ interface Props {
   lastActivities: Record<number, LastActivity>;
   page: number;
   pageSize: number;
+  pageSizeOptions: number[];
+  sorting: SortingState;
+  rowSelection: RowSelectionState;
   onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+  onSortingChange: (s: SortingState) => void;
+  onRowSelectionChange: (s: RowSelectionState) => void;
 }
 
-export function WorkflowTable({ data, runtime, lastActivities, page, pageSize, onPageChange }: Props) {
+export function WorkflowTable({
+  data, runtime, lastActivities, page, pageSize, pageSizeOptions, sorting, rowSelection,
+  onPageChange, onPageSizeChange, onSortingChange, onRowSelectionChange,
+}: Props) {
   const navigate = useNavigate();
-  const columns = useMemo(
-    () => buildWorkflowColumns(runtime, lastActivities),
-    [runtime, lastActivities],
-  );
+
+  const columns = useMemo<ColumnDef<Workflow>[]>(() => [
+    {
+      id: 'select',
+      header: ({ table }) => (
+        <Checkbox
+          size="small"
+          indeterminate={table.getIsSomeRowsSelected()}
+          checked={table.getIsAllRowsSelected()}
+          onChange={table.getToggleAllRowsSelectedHandler()}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ),
+      cell: ({ row }) => (
+        <Checkbox
+          size="small"
+          checked={row.getIsSelected()}
+          onChange={row.getToggleSelectedHandler()}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ),
+    },
+    ...buildWorkflowColumns(runtime, lastActivities),
+  ], [runtime, lastActivities]);
 
   const table = useReactTable({
     data: data?.content ?? [],
     columns,
+    state: { sorting, rowSelection },
+    manualSorting: true,
+    enableRowSelection: true,
+    getRowId: (row) => String(row.id),
+    onSortingChange: (updater) =>
+      onSortingChange(typeof updater === 'function' ? updater(sorting) : updater),
+    onRowSelectionChange: (updater) =>
+      onRowSelectionChange(typeof updater === 'function' ? updater(rowSelection) : updater),
     getCoreRowModel: getCoreRowModel(),
   });
 
@@ -49,11 +91,29 @@ export function WorkflowTable({ data, runtime, lastActivities, page, pageSize, o
           <TableHead>
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id}>
-                {hg.headers.map((h) => (
-                  <TableCell key={h.id} sx={{ fontWeight: 600, color: 'text.secondary', textTransform: 'uppercase', fontSize: 11 }}>
-                    {flexRender(h.column.columnDef.header, h.getContext())}
-                  </TableCell>
-                ))}
+                {hg.headers.map((h) => {
+                  const sortable = SORTABLE_COLUMNS.has(h.column.id);
+                  const sort = sorting.find((s) => s.id === h.column.id);
+                  return (
+                    <TableCell
+                      key={h.id}
+                      sx={{ fontWeight: 600, color: 'text.secondary', textTransform: 'uppercase', fontSize: 11 }}
+                      sortDirection={sort ? (sort.desc ? 'desc' : 'asc') : false}
+                    >
+                      {sortable
+                        ? (
+                          <TableSortLabel
+                            active={!!sort}
+                            direction={sort?.desc ? 'desc' : 'asc'}
+                            onClick={() => h.column.toggleSorting()}
+                          >
+                            {flexRender(h.column.columnDef.header, h.getContext())}
+                          </TableSortLabel>
+                        )
+                        : flexRender(h.column.columnDef.header, h.getContext())}
+                    </TableCell>
+                  );
+                })}
               </TableRow>
             ))}
           </TableHead>
@@ -69,6 +129,7 @@ export function WorkflowTable({ data, runtime, lastActivities, page, pageSize, o
                 <TableRow
                   key={row.id}
                   hover
+                  selected={row.getIsSelected()}
                   sx={{ cursor: 'pointer' }}
                   onClick={() => navigate(`/workflows/${row.original.id}`)}
                 >
@@ -88,8 +149,9 @@ export function WorkflowTable({ data, runtime, lastActivities, page, pageSize, o
         count={data?.totalElements ?? 0}
         page={page}
         rowsPerPage={pageSize}
-        rowsPerPageOptions={[pageSize]}
+        rowsPerPageOptions={pageSizeOptions}
         onPageChange={(_, p) => onPageChange(p)}
+        onRowsPerPageChange={(e) => onPageSizeChange(Number(e.target.value))}
       />
     </Paper>
   );

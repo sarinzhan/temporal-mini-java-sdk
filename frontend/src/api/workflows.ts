@@ -11,13 +11,16 @@ export interface ListParams {
   page: number;
   size: number;
   states: string[];
+  /** {@code field,dir}, e.g. {@code "createdAt,desc"}. Backend whitelists fields. */
+  sort?: string;
 }
 
 export const workflowsApi = {
-  list: ({ page, size, states }: ListParams) => {
+  list: ({ page, size, states, sort }: ListParams) => {
     const q = new URLSearchParams();
     q.set('page', String(page));
     q.set('size', String(size));
+    if (sort) q.set('sort', sort);
     states.forEach((s) => q.append('state', s));
     return request<WorkflowPage>(`/workflows?${q}`);
   },

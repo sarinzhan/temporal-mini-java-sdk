@@ -1,4 +1,4 @@
-const BASE = '/temporal-mini/api';
+import { baseUrl } from '../utils/baseUrl';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -12,7 +12,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !(init.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';
   }
-  const res = await fetch(BASE + path, {
+  const res = await fetch(baseUrl.get() + path, {
     credentials: 'include',
     ...init,
     headers: { ...headers, ...(init?.headers as Record<string, string>) },

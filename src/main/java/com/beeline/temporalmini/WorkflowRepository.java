@@ -23,4 +23,18 @@ public interface WorkflowRepository extends JpaRepository<WorkflowEntity, Long> 
     Page<WorkflowEntity> findByStateIn(Collection<WorkflowState> states, Pageable pageable);
 
     long countByState(WorkflowState state);
+
+    /**
+     * Bulk selector by creation window. Used by {@code /workflows/bulk/*} endpoints
+     * to expand a {@code {from, to, states}} filter into a list of ids before
+     * applying the action. {@code states} is optional via the JPQL conditional.
+     */
+    @Query("""
+            SELECT w.id FROM WorkflowEntity w
+            WHERE w.createdAt BETWEEN :from AND :to
+              AND (:#{#states == null || #states.isEmpty()} = TRUE OR w.state IN :states)
+            """)
+    List<Long> findIdsByCreatedAtRange(@Param("from") LocalDateTime from,
+                                       @Param("to")   LocalDateTime to,
+                                       @Param("states") Collection<WorkflowState> states);
 }

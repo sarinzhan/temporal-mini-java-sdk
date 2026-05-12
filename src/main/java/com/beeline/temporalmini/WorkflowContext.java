@@ -1,5 +1,6 @@
 package com.beeline.temporalmini;
 
+import com.beeline.temporalmini.metrics.ActivityMetrics;
 import lombok.extern.slf4j.Slf4j;
 import tools.jackson.databind.ObjectMapper;
 
@@ -13,25 +14,33 @@ public class WorkflowContext {
     private final WorkflowEntity workflowEntity;
     private final ActivityRepository activityRepository;
     private final ObjectMapper objectMapper;
+    private final ActivityMetrics activityMetrics;
 
     public WorkflowContext(WorkflowEntity workflowEntity,
-                           ActivityRepository activityRepository, ObjectMapper objectMapper) {
+                           ActivityRepository activityRepository, ObjectMapper objectMapper,
+                           ActivityMetrics activityMetrics) {
         this.workflowEntity = workflowEntity;
         this.activityRepository = activityRepository;
         this.objectMapper = objectMapper;
+        this.activityMetrics = activityMetrics;
     }
 
     public <T> T activity(String name, Class<T> resultType, RetryPolicy retryPolicy, Supplier<T> fn) {
+
+        // search
         Activity existing = activityRepository.findSuccessfulActivity(workflowEntity.getId(), name).orElse(null);
         if (existing != null) {
             log.debug("[{}:{}] Activity {} — skipped (already succeeded on attempt {})",
                     workflowEntity.getWorkflowType(), workflowEntity.getId(), name, existing.getAttempt());
             return deserialize(existing.getOutputPayload(), resultType);
         }
+
+
+        // run
         int attempt = activityRepository.countByWorkflowIdAndName(workflowEntity.getId(), name) + 1;
         LocalDateTime startedAt = LocalDateTime.now();
         try {
-            T result = fn.get();
+            T result = recordCallable(name, workflowEntity.getWorkflowType(), fn::get);
             saveActivity(name, attempt, true, startedAt, null, serialize(result), null);
             log.info("[{}:{}] Activity {} — OK (attempt {}/{})",
                     workflowEntity.getWorkflowType(), workflowEntity.getId(), name, attempt, retryPolicy.getMaxAttempts());
@@ -44,16 +53,20 @@ public class WorkflowContext {
     }
 
     public void activity(String name, RetryPolicy retryPolicy, Runnable fn) {
+
+        // search result
         Activity existing = activityRepository.findSuccessfulActivity(workflowEntity.getId(), name).orElse(null);
         if (existing != null) {
             log.debug("[{}:{}] Activity {} — skipped (already succeeded on attempt {})",
                     workflowEntity.getWorkflowType(), workflowEntity.getId(), name, existing.getAttempt());
             return;
         }
+
+        // call
         int attempt = activityRepository.countByWorkflowIdAndName(workflowEntity.getId(), name) + 1;
         LocalDateTime startedAt = LocalDateTime.now();
         try {
-            fn.run();
+            recordCallable(name, workflowEntity.getWorkflowType(), () -> { fn.run(); return null; });
             saveActivity(name, attempt, true, startedAt, null, null, null);
             log.info("[{}:{}] Activity {} — OK (attempt {}/{})",
                     workflowEntity.getWorkflowType(), workflowEntity.getId(), name, attempt, retryPolicy.getMaxAttempts());
@@ -61,6 +74,16 @@ public class WorkflowContext {
             saveActivity(name, attempt, false, startedAt, null, null, ex.getMessage());
             scheduleRetry(name, attempt, retryPolicy, ex);
         }
+    }
+
+
+
+
+    private <T> T recordCallable(String workflowName, String activityName, java.util.concurrent.Callable<T> fn) throws Exception {
+        if (activityMetrics == null) {
+            return fn.call();
+        }
+        return activityMetrics.record(workflowName, activityName, fn);
     }
 
     private void scheduleRetry(String name, int attempt, RetryPolicy retryPolicy, Exception ex) {

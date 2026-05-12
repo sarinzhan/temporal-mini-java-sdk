@@ -1,9 +1,12 @@
 package com.beeline.temporalmini;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -24,4 +27,12 @@ public interface ActivityRepository extends JpaRepository<Activity, Long> {
               AND a.startedAt = (SELECT MAX(b.startedAt) FROM Activity b WHERE b.workflowId = a.workflowId)
             """)
     List<Activity> findLatestActivities(@Param("ids") Collection<Long> ids);
+
+    @Modifying
+    @Transactional
+    void deleteByWorkflowId(Long workflowId);
+
+    @Modifying
+    @Transactional
+    int deleteByWorkflowIdAndStartedAtGreaterThanEqual(Long workflowId, LocalDateTime startedAt);
 }

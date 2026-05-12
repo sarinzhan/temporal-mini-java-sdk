@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { Alert, Box, Button, CircularProgress, Container, Paper, Stack, Typography } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import EditIcon from '@mui/icons-material/Edit';
 import { Link, useParams } from 'react-router-dom';
 import { Header } from '../components/Header/Header';
 import { StatusBadge } from '../components/StatusBadge/StatusBadge';
@@ -7,10 +9,14 @@ import { WorkflowControls } from '../components/WorkflowControls/WorkflowControl
 import { ActivityList } from '../components/ActivityList/ActivityList';
 import { JsonViewer } from '../components/JsonViewer/JsonViewer';
 import { NextRunCell } from '../components/WorkflowTable/NextRunCell';
+import { PayloadEditDialog } from '../components/PayloadEditDialog/PayloadEditDialog';
 import { useWorkflow } from '../hooks/useWorkflow';
 import { useActivities } from '../hooks/useActivities';
 import { useRuntime } from '../hooks/useRuntime';
+import { useEditPayload } from '../hooks/useEditPayload';
 import { fmtDate } from '../utils/format';
+
+const PAYLOAD_EDITABLE = new Set(['NEW', 'STOPPED', 'FAILED']);
 
 export function WorkflowDetailsPage() {
   const { id: idParam } = useParams<{ id: string }>();
@@ -19,6 +25,8 @@ export function WorkflowDetailsPage() {
   const { data: workflow, isLoading, error } = useWorkflow(id);
   const { data: activities = [] } = useActivities(id);
   const { data: runtime = {} } = useRuntime();
+  const { setWorkflowPayload } = useEditPayload(id);
+  const [editOpen, setEditOpen] = useState(false);
 
   return (
     <>
@@ -67,22 +75,39 @@ export function WorkflowDetailsPage() {
                   </Alert>
                 )}
 
-                {workflow.nextPayload && (
-                  <Box sx={{ mt: 2 }}>
+                <Box sx={{ mt: 2 }}>
+                  <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
                     <Typography variant="caption" sx={{ fontWeight: 700, textTransform: 'uppercase', color: 'text.disabled' }}>
                       Initial payload
                     </Typography>
-                    <Box sx={{ mt: 0.5 }}>
-                      <JsonViewer raw={workflow.nextPayload} title="Initial payload" />
-                    </Box>
-                  </Box>
-                )}
+                    {PAYLOAD_EDITABLE.has(workflow.state) && (
+                      <Button size="small" startIcon={<EditIcon fontSize="small" />}
+                              onClick={() => setEditOpen(true)} sx={{ minWidth: 0 }}>
+                        Edit
+                      </Button>
+                    )}
+                  </Stack>
+                  <JsonViewer raw={workflow.nextPayload} title="Initial payload" />
+                </Box>
               </Paper>
 
               <Typography variant="overline" sx={{ color: 'text.secondary', fontWeight: 700 }}>
                 Activities
               </Typography>
-              <ActivityList activities={activities} />
+              <ActivityList workflowId={workflow.id} activities={activities} />
+
+              <PayloadEditDialog
+                open={editOpen}
+                title={`Edit input — workflow #${workflow.id}`}
+                initialValue={workflow.nextPayload}
+                saving={setWorkflowPayload.isPending}
+                onClose={() => setEditOpen(false)}
+                onSave={(payload) => {
+                  setWorkflowPayload.mutate(payload, {
+                    onSuccess: () => setEditOpen(false),
+                  });
+                }}
+              />
             </>
           )}
         </Stack>

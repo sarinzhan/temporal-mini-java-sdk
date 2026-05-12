@@ -13,7 +13,7 @@ public class WorkflowEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     private String workflowType;
-    @Enumerated(EnumType.STRING)
+    @Convert(converter = WorkflowStateConverter.class)
     private WorkflowState state;
     @Column(columnDefinition = "text")
     private String nextPayload;

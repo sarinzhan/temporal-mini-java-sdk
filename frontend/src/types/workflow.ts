@@ -5,11 +5,14 @@
 export type DbWorkflowState =
   | 'NEW'
   | 'RUNNABLE'
-  | 'BLOCKED'
+  | 'STOPPED'
   | 'FINISHED'
   | 'FAILED';
 
 export type VisualWorkflowState = DbWorkflowState | 'RUNNING';
+
+/** Alias for ergonomics — matches the persisted enum on the backend. */
+export type WorkflowState = DbWorkflowState;
 
 export interface Workflow {
   id: number;

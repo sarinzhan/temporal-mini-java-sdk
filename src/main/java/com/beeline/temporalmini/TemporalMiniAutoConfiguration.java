@@ -1,6 +1,9 @@
 package com.beeline.temporalmini;
 
-import org.flywaydb.core.Flyway;
+import com.beeline.temporalmini.metrics.ActivityMetrics;
+import com.beeline.temporalmini.metrics.WorkflowMetrics;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -11,6 +14,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import com.beeline.temporalmini.ui.AuthController;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
+import org.springframework.boot.jpa.autoconfigure.EntityManagerFactoryDependsOnPostProcessor;
 import org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.*;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
@@ -44,7 +48,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 @EnableJpaRepositories(basePackageClasses = WorkflowRepository.class)
 @EntityScan(basePackageClasses = WorkflowEntity.class)
 @EnableScheduling
-@EnableConfigurationProperties(WorkflowSecurityProperties.class)
+@EnableConfigurationProperties({ WorkflowSecurityProperties.class, MetricsProperties.class })
 public class TemporalMiniAutoConfiguration {
 
     public static final String EXECUTOR_BEAN = "workflowExecutor";
@@ -53,8 +57,11 @@ public class TemporalMiniAutoConfiguration {
     public WorkflowEngine workflowEngine(List<Workflow> workflows,
                                          WorkflowRepository workflowRepository,
                                          ActivityRepository activityRepository,
-                                         ObjectMapper objectMapper) {
-        return new WorkflowEngine(workflows, workflowRepository, activityRepository, objectMapper);
+                                         ObjectMapper objectMapper,
+                                         ObjectProvider<ActivityMetrics> activityMetrics,
+                                         ObjectProvider<WorkflowMetrics> workflowMetrics) {
+        return new WorkflowEngine(workflows, workflowRepository, activityRepository, objectMapper,
+                activityMetrics.getIfAvailable(), workflowMetrics.getIfAvailable());
     }
 
     @Bean
@@ -99,23 +106,43 @@ public class TemporalMiniAutoConfiguration {
         return new WorkflowScheduler(engine, workflowRepository, executor, runtimeRegistry);
     }
 
-    @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(Flyway.class)
-    static class TemporalMiniFlywayConfiguration {
+    @Bean
+    @ConditionalOnProperty(name = "workflow.metrics.enabled", havingValue = "true", matchIfMissing = true)
+    public MetricsSampler metricsSampler(@Qualifier(EXECUTOR_BEAN) ThreadPoolTaskExecutor executor,
+                                         WorkflowRuntimeRegistry runtimeRegistry,
+                                         WorkflowRepository workflowRepository,
+                                         MetricSampleRepository metricSampleRepository,
+                                         MetricsProperties properties) {
+        return new MetricsSampler(executor, runtimeRegistry, workflowRepository, metricSampleRepository, properties);
+    }
 
-        @Bean
-        @ConditionalOnBean(DataSource.class)
-        public Flyway temporalMiniFlyway(DataSource dataSource) {
-            Flyway flyway = Flyway.configure()
-                    .dataSource(dataSource)
-                    .locations("classpath:db/migration/temporal-mini")
-                    .defaultSchema("wflow")
-                    .createSchemas(true)
-                    .table("flyway_temporal_mini_history")
-                    .load();
-            flyway.migrate();
-            return flyway;
+    /**
+     * Replaces the previous Flyway integration. Migrations under
+     * {@code classpath:db/migration/temporal-mini/V*__*.sql} are applied at startup
+     * by {@link TemporalMiniSchemaMigrator}; applied versions are tracked in
+     * {@code wflow.sql_migrations}. The bean's factory method runs the migration,
+     * and {@link SchemaMigratorJpaDependencyConfig} ensures the JPA EMF waits on
+     * us so entities never see an unmigrated schema.
+     */
+    @Bean
+    @ConditionalOnBean(DataSource.class)
+    @ConditionalOnMissingBean(TemporalMiniSchemaMigrator.class)
+    public TemporalMiniSchemaMigrator temporalMiniSchemaMigrator(DataSource dataSource) {
+        TemporalMiniSchemaMigrator migrator = new TemporalMiniSchemaMigrator(dataSource);
+        migrator.migrate();
+        return migrator;
+    }
+
+    /** Force {@code EntityManagerFactory} construction to wait until migrations have run. */
+    static class SchemaMigratorJpaDependencyConfig extends EntityManagerFactoryDependsOnPostProcessor {
+        SchemaMigratorJpaDependencyConfig() {
+            super("temporalMiniSchemaMigrator");
         }
+    }
+
+    @Bean
+    public static SchemaMigratorJpaDependencyConfig schemaMigratorJpaDependencyConfig() {
+        return new SchemaMigratorJpaDependencyConfig();
     }
 
     /**
@@ -189,5 +216,18 @@ public class TemporalMiniAutoConfiguration {
                     }));
             return http.build();
         }
+    }
+
+
+    @Bean
+    @ConditionalOnBean(MeterRegistry.class)
+    public ActivityMetrics activityMetrics(MeterRegistry registry) {
+        return new ActivityMetrics(registry);
+    }
+
+    @Bean
+    @ConditionalOnBean(MeterRegistry.class)
+    public WorkflowMetrics workflowMetrics(MeterRegistry registry) {
+        return new WorkflowMetrics(registry);
     }
 }
