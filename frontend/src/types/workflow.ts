@@ -7,10 +7,13 @@ export type DbWorkflowState =
   | 'FAILED';
 
 /**
- * Visual states shown in the UI. IN_QUEUE and WAITING are derived server-side
- * from RETRY rows split by nextRetryAt; they are not persisted enum values.
+ * Visual states shown in the UI.
+ * - {@code IN_QUEUE} and {@code WAITING} are derived server-side from RETRY rows
+ *   split by {@code nextRetryAt} (labeled "Ready to run" and "Waiting retry").
+ * - {@code RUNNING} is derived from the in-memory runtime registry (worker thread
+ *   actually executing). None of these are persisted enum values.
  */
-export type VisualWorkflowState = DbWorkflowState | 'IN_QUEUE' | 'WAITING';
+export type VisualWorkflowState = DbWorkflowState | 'IN_QUEUE' | 'WAITING' | 'RUNNING';
 
 /** Alias for ergonomics — matches the persisted enum on the backend. */
 export type WorkflowState = DbWorkflowState;

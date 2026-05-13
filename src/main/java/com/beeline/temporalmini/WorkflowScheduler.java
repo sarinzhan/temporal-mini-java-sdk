@@ -38,6 +38,7 @@ public class WorkflowScheduler {
             if (!runtimeRegistry.tryStart(id)) continue;
             submitted++;
             executor.execute(() -> {
+                runtimeRegistry.markRunning(id);
                 try {
                     engine.run(id);
                 } catch (Exception ex) {

@@ -1,6 +1,6 @@
 import { Chip } from '@mui/material';
 import type { ColumnDef } from '@tanstack/react-table';
-import type { Workflow } from '../../types/workflow';
+import type { RuntimeMap, Workflow } from '../../types/workflow';
 import type { LastActivity } from '../../types/activity';
 import { StatusBadge } from '../StatusBadge/StatusBadge';
 import { NextRunCell } from './NextRunCell';
@@ -21,6 +21,7 @@ export const SORTABLE_COLUMNS = new Set(['id', 'createdAt', 'state']);
  */
 export function buildWorkflowColumns(
   lastActs: Record<number, LastActivity>,
+  runtime: RuntimeMap,
 ): ColumnDef<Workflow>[] {
   return [
     {
@@ -60,7 +61,12 @@ export function buildWorkflowColumns(
     {
       id: 'nextRun',
       header: 'Next run',
-      cell: (ctx) => <NextRunCell workflow={ctx.row.original} />,
+      cell: (ctx) => (
+        <NextRunCell
+          workflow={ctx.row.original}
+          runningSince={runtime[ctx.row.original.id]}
+        />
+      ),
     },
     {
       id: 'lastActivity',

@@ -8,6 +8,7 @@ export const statusColors: Record<string, string> = {
   NEW:      '#6c8eff',
   IN_QUEUE: '#0ea5e9',
   WAITING:  '#94a3b8',
+  RUNNING:  '#22c55e',
   RETRY:    '#f59e0b',
   STOPPED:  '#8b5cf6',
   FINISHED: '#3ecf8e',

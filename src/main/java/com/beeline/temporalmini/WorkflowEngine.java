@@ -25,16 +25,23 @@ public class WorkflowEngine {
     private final Map<String, Workflow> registry;
     private final WorkflowRepository workflowRepository;
     private final ActivityRepository activityRepository;
+    private final WorkflowHistoryRepository workflowHistoryRepository;
+    private final ActivityHistoryRepository activityHistoryRepository;
     private final ObjectMapper objectMapper;
     private final ActivityMetrics activityMetrics;
     private final WorkflowMetrics workflowMetrics;
 
     public WorkflowEngine(List<Workflow> workflows, WorkflowRepository workflowRepository,
-                          ActivityRepository activityRepository, ObjectMapper objectMapper,
+                          ActivityRepository activityRepository,
+                          WorkflowHistoryRepository workflowHistoryRepository,
+                          ActivityHistoryRepository activityHistoryRepository,
+                          ObjectMapper objectMapper,
                           ActivityMetrics activityMetrics, WorkflowMetrics workflowMetrics) {
         this.registry = workflows.stream().collect(Collectors.toMap(Workflow::type, Function.identity()));
         this.workflowRepository = workflowRepository;
         this.activityRepository = activityRepository;
+        this.workflowHistoryRepository = workflowHistoryRepository;
+        this.activityHistoryRepository = activityHistoryRepository;
         this.objectMapper = objectMapper;
         this.activityMetrics = activityMetrics;
         this.workflowMetrics = workflowMetrics;
@@ -81,8 +88,15 @@ public class WorkflowEngine {
         }
         entity.setNextRetryAt(null);
 
+        WorkflowHistoryEntity hist = new WorkflowHistoryEntity();
+        hist.setWorkflowId(workflowId);
+        hist.setStartedAt(LocalDateTime.now());
+        hist.setInitialState(entity.getState().name());
+        hist = workflowHistoryRepository.save(hist);
+
         Workflow workflow = registry.get(entity.getWorkflowType());
-        WorkflowContext ctx = new WorkflowContext(entity, activityRepository, objectMapper, activityMetrics);
+        WorkflowContext ctx = new WorkflowContext(entity, activityRepository,
+                activityHistoryRepository, hist.getId(), objectMapper, activityMetrics);
         log.info("[{}:{}] running", entity.getWorkflowType(), workflowId);
         try {
             recordRun(entity.getWorkflowType(), workflow, ctx);
@@ -104,6 +118,11 @@ public class WorkflowEngine {
             log.error("[{}:{}] FAILED — unexpected error: {}",
                     entity.getWorkflowType(), workflowId, ex.getMessage());
         }
+        hist.setFinishedAt(LocalDateTime.now());
+        hist.setOutcome(entity.getState().name());
+        hist.setErrorMessage(entity.getErrorMessage());
+        hist.setNextRetryAt(entity.getNextRetryAt());
+        workflowHistoryRepository.save(hist);
         workflowRepository.save(entity);
     }
 

@@ -13,14 +13,21 @@ public class WorkflowContext {
 
     private final WorkflowEntity workflowEntity;
     private final ActivityRepository activityRepository;
+    private final ActivityHistoryRepository activityHistoryRepository;
+    private final Long workflowHistoryId;
     private final ObjectMapper objectMapper;
     private final ActivityMetrics activityMetrics;
 
     public WorkflowContext(WorkflowEntity workflowEntity,
-                           ActivityRepository activityRepository, ObjectMapper objectMapper,
+                           ActivityRepository activityRepository,
+                           ActivityHistoryRepository activityHistoryRepository,
+                           Long workflowHistoryId,
+                           ObjectMapper objectMapper,
                            ActivityMetrics activityMetrics) {
         this.workflowEntity = workflowEntity;
         this.activityRepository = activityRepository;
+        this.activityHistoryRepository = activityHistoryRepository;
+        this.workflowHistoryId = workflowHistoryId;
         this.objectMapper = objectMapper;
         this.activityMetrics = activityMetrics;
     }
@@ -114,6 +121,20 @@ public class WorkflowContext {
         activity.setOutputPayload(outputPayload);
         activity.setErrorMessage(errorMessage);
         activityRepository.save(activity);
+
+        ActivityHistoryEntity hist = new ActivityHistoryEntity();
+        hist.setWorkflowHistoryId(workflowHistoryId);
+        hist.setWorkflowId(workflowEntity.getId());
+        hist.setActivityId(activity.getId());
+        hist.setName(name);
+        hist.setAttempt(attempt);
+        hist.setSuccess(success);
+        hist.setStartedAt(startedAt);
+        hist.setFinishedAt(activity.getFinishedAt());
+        hist.setInputPayload(inputPayload);
+        hist.setOutputPayload(outputPayload);
+        hist.setErrorMessage(errorMessage);
+        activityHistoryRepository.save(hist);
     }
 
     private <T> T deserialize(String payload, Class<T> type) {

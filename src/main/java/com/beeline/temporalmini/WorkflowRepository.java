@@ -24,6 +24,14 @@ public interface WorkflowRepository extends JpaRepository<WorkflowEntity, Long> 
            "AND (w.nextRetryAt IS NULL OR w.nextRetryAt <= :now)")
     long countQueued(@Param("now") LocalDateTime now);
 
+    @Query("SELECT COUNT(w) FROM WorkflowEntity w WHERE w.state IN " +
+           "(com.beeline.temporalmini.WorkflowState.NEW, " +
+           "com.beeline.temporalmini.WorkflowState.RETRY) " +
+           "AND (w.nextRetryAt IS NULL OR w.nextRetryAt <= :now) " +
+           "AND w.id NOT IN :excludeIds")
+    long countQueuedExcluding(@Param("now") LocalDateTime now,
+                              @Param("excludeIds") Collection<Long> excludeIds);
+
     @Query("SELECT COUNT(w) FROM WorkflowEntity w WHERE w.state = " +
            "com.beeline.temporalmini.WorkflowState.RETRY " +
            "AND w.nextRetryAt > :now")
@@ -35,6 +43,15 @@ public interface WorkflowRepository extends JpaRepository<WorkflowEntity, Long> 
            "(w.state = com.beeline.temporalmini.WorkflowState.RETRY AND (w.nextRetryAt IS NULL OR w.nextRetryAt <= :now)))")
     Page<WorkflowEntity> findInQueue(@Param("now") LocalDateTime now, Pageable pageable);
 
+    /** Like {@link #findInQueue} but excludes ids currently being executed (registry). */
+    @Query("SELECT w FROM WorkflowEntity w WHERE " +
+           "(w.state = com.beeline.temporalmini.WorkflowState.NEW OR " +
+           "(w.state = com.beeline.temporalmini.WorkflowState.RETRY AND (w.nextRetryAt IS NULL OR w.nextRetryAt <= :now))) " +
+           "AND w.id NOT IN :excludeIds")
+    Page<WorkflowEntity> findInQueueExcluding(@Param("now") LocalDateTime now,
+                                              @Param("excludeIds") Collection<Long> excludeIds,
+                                              Pageable pageable);
+
     /** RETRY rows where nextRetryAt > now — sleeping until retry window (WAITING view). */
     @Query("SELECT w FROM WorkflowEntity w WHERE " +
            "w.state = com.beeline.temporalmini.WorkflowState.RETRY AND w.nextRetryAt > :now")
@@ -43,6 +60,8 @@ public interface WorkflowRepository extends JpaRepository<WorkflowEntity, Long> 
     Page<WorkflowEntity> findByState(WorkflowState state, Pageable pageable);
 
     Page<WorkflowEntity> findByStateIn(Collection<WorkflowState> states, Pageable pageable);
+
+    Page<WorkflowEntity> findByIdIn(Collection<Long> ids, Pageable pageable);
 
     long countByState(WorkflowState state);
 

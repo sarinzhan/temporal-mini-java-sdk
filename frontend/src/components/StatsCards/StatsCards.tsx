@@ -3,11 +3,11 @@ import { Box } from '@mui/material';
 import { StatCard } from './StatCard';
 import type { StatsByState, VisualWorkflowState } from '../../types/workflow';
 
-const ORDER: VisualWorkflowState[] = ['NEW', 'IN_QUEUE', 'WAITING', 'STOPPED', 'FINISHED', 'FAILED'];
+const ORDER: VisualWorkflowState[] = ['NEW', 'IN_QUEUE', 'WAITING', 'RUNNING', 'STOPPED', 'FINISHED', 'FAILED'];
 
 const LABELS: Partial<Record<VisualWorkflowState, string>> = {
-  IN_QUEUE: 'In Queue',
-  WAITING:  'Waiting',
+  IN_QUEUE: 'Ready to run',
+  WAITING:  'Waiting retry',
 };
 
 interface Props {
@@ -41,7 +41,7 @@ export function StatsCards({ stats, selected, onChange }: Props) {
   }
 
   return (
-    <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 1.5 }}>
+    <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 1.5 }}>
       <StatCard
         label="All"
         value={dbTotal || '—'}

@@ -27,10 +27,13 @@ public class WorkflowCoreAutoConfiguration {
     public WorkflowEngine workflowEngine(List<Workflow> workflows,
                                          WorkflowRepository workflowRepository,
                                          ActivityRepository activityRepository,
+                                         WorkflowHistoryRepository workflowHistoryRepository,
+                                         ActivityHistoryRepository activityHistoryRepository,
                                          ObjectMapper objectMapper,
                                          ObjectProvider<ActivityMetrics> activityMetrics,
                                          ObjectProvider<WorkflowMetrics> workflowMetrics) {
-        return new WorkflowEngine(workflows, workflowRepository, activityRepository, objectMapper,
+        return new WorkflowEngine(workflows, workflowRepository, activityRepository,
+                workflowHistoryRepository, activityHistoryRepository, objectMapper,
                 activityMetrics.getIfAvailable(), workflowMetrics.getIfAvailable());
     }
 

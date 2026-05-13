@@ -59,10 +59,14 @@ public class WorkflowUiController {
     @GetMapping("/stats")
     public Map<String, Long> stats() {
         java.time.LocalDateTime now = java.time.LocalDateTime.now();
+        Set<Long> running = runtimeRegistry.ids();
         Map<String, Long> result = new LinkedHashMap<>();
         result.put("NEW",      workflowRepository.countByState(WorkflowState.NEW));
-        result.put("IN_QUEUE", workflowRepository.countQueued(now));
+        result.put("IN_QUEUE", running.isEmpty()
+                ? workflowRepository.countQueued(now)
+                : workflowRepository.countQueuedExcluding(now, running));
         result.put("WAITING",  workflowRepository.countWaiting(now));
+        result.put("RUNNING",  (long) running.size());
         result.put("STOPPED",  workflowRepository.countByState(WorkflowState.STOPPED));
         result.put("FINISHED", workflowRepository.countByState(WorkflowState.FINISHED));
         result.put("FAILED",   workflowRepository.countByState(WorkflowState.FAILED));
@@ -84,10 +88,12 @@ public class WorkflowUiController {
     /**
      * Paged workflow list. Filtering supports multiple states via repeated query
      * params: {@code ?state=NEW&state=RETRY} or comma-separated {@code ?state=NEW,RETRY}.
-     * Two virtual filter values are also accepted:
+     * Three virtual filter values are also accepted:
      * <ul>
      *   <li>{@code IN_QUEUE} — NEW + RETRY where nextRetryAt &lt;= now (ready for pickup)</li>
      *   <li>{@code WAITING}  — RETRY where nextRetryAt &gt; now (sleeping)</li>
+     *   <li>{@code RUNNING}  — ids tracked as running in {@link WorkflowRuntimeRegistry}
+     *       (worker thread actually executing)</li>
      * </ul>
      * Sorting via {@code ?sort=field,dir} (e.g. {@code sort=createdAt,desc}); default is
      * {@code id,desc}.
@@ -105,11 +111,21 @@ public class WorkflowUiController {
         // Handle virtual filter values — single-state only (UI never mixes these with others)
         if (states.size() == 1) {
             java.time.LocalDateTime now = java.time.LocalDateTime.now();
-            if ("IN_QUEUE".equals(states.get(0))) return workflowRepository.findInQueue(now, pageable);
+            if ("IN_QUEUE".equals(states.get(0))) {
+                Set<Long> running = runtimeRegistry.ids();
+                return running.isEmpty()
+                        ? workflowRepository.findInQueue(now, pageable)
+                        : workflowRepository.findInQueueExcluding(now, running, pageable);
+            }
             if ("WAITING".equals(states.get(0)))  return workflowRepository.findWaiting(now, pageable);
+            if ("RUNNING".equals(states.get(0))) {
+                Set<Long> ids = runtimeRegistry.ids();
+                if (ids.isEmpty()) return Page.empty(pageable);
+                return workflowRepository.findByIdIn(ids, pageable);
+            }
         }
         List<WorkflowState> dbStates = states.stream()
-                .filter(s -> !s.equals("IN_QUEUE") && !s.equals("WAITING"))
+                .filter(s -> !s.equals("IN_QUEUE") && !s.equals("WAITING") && !s.equals("RUNNING"))
                 .map(WorkflowState::valueOf)
                 .toList();
         if (dbStates.isEmpty())      return workflowRepository.findAll(pageable);

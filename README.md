@@ -65,7 +65,7 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 | `MetricsSampler` | `@Scheduled` snapshot writer for the metrics chart — appends a row to `wflow.metric_sample` every 10s and trims older rows on a daily cron. |
 | `WorkflowScheduler` | `@Scheduled` poller that picks up `NEW` and `RETRY` (when `nextRetryAt <= now`) workflows and submits them to the executor. |
 | `workflowExecutor` | Bounded `ThreadPoolTaskExecutor`. Runs workflows in parallel. |
-| `WorkflowRuntimeRegistry` | In-memory set of workflow ids the engine is currently executing. Used for deduplication across overlapping polls. |
+| `WorkflowRuntimeRegistry` | In-memory tracker for ids the scheduler has handed to the executor. Distinguishes `SUBMITTED` (in the executor's queue) from `RUNNING` (worker thread actually executing); the latter powers the UI's `RUNNING` state and the `runtimeCount` metric. Also acts as a deduplication guard across overlapping polls. |
 | `WorkflowRepository` / `ActivityRepository` | Spring Data JPA repos. Two tables: `wflow.workflow`, `wflow.activity`. |
 | `ActivityMetrics` / `WorkflowMetrics` | Optional Micrometer instrumentation. Auto-registered when a `MeterRegistry` is present on the classpath. |
 | `WorkflowUiController` | REST API at `/temporal-mini/api/**`: workflows, stats, pool, control actions. |
@@ -245,12 +245,13 @@ The persisted state machine has **four** states. There is intentionally no "curr
 | `FINISHED` | yes | no | completed successfully (terminal) |
 | `FAILED` | yes | no | exhausted retries (terminal) |
 
-The UI shows two additional **derived** views computed server-side from `RETRY` rows:
+The UI shows three additional **derived** views, computed server-side:
 
-| UI label | Meaning |
-|---|---|
-| **In Queue** | `NEW` + `RETRY` rows where `nextRetryAt <= now` — ready to be picked up on the next poll |
-| **Waiting** | `RETRY` rows where `nextRetryAt > now` — sleeping until their retry window opens |
+| UI label | Wire state | Source | Meaning |
+|---|---|---|---|
+| **Ready to run** | `IN_QUEUE` | DB | `NEW` + `RETRY` rows where `nextRetryAt <= now` — ready to be picked up on the next poll |
+| **Waiting retry** | `WAITING` | DB | `RETRY` rows where `nextRetryAt > now` — sleeping until their retry window opens |
+| **Running** | `RUNNING` | `WorkflowRuntimeRegistry` | ids the executor has actually started running on a worker thread (excludes those still sitting in the executor queue) |
 
 **Manual controls** (also exposed in the UI):
 
@@ -270,10 +271,10 @@ All endpoints are mounted under `/temporal-mini/api`:
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/stats` | Counts per logical state: `NEW`, `IN_QUEUE`, `WAITING`, `STOPPED`, `FINISHED`, `FAILED`. `IN_QUEUE` and `WAITING` are derived from `RETRY` rows split by `nextRetryAt`. |
+| `GET` | `/stats` | Counts per logical state: `NEW`, `IN_QUEUE`, `WAITING`, `RUNNING`, `STOPPED`, `FINISHED`, `FAILED`. `IN_QUEUE` and `WAITING` are derived from `RETRY` rows split by `nextRetryAt`; `RUNNING` is the size of the in-memory runtime registry (workers currently executing). |
 | `GET` | `/pool` | Live snapshot of the workflow executor: `{active, free, poolSize, corePoolSize, maxPoolSize, queue, queueCapacity}`. |
 | `GET` | `/metrics/history?from=&to=&bucket=` | Time-series of pool/state/runtime counters. `bucket` ∈ `raw / second / minute / hour / day` — wide windows aggregate via Postgres `date_trunc`. |
-| `GET` | `/workflows?state=&page=&size=&sort=` | Paged list. `state` repeats for multi-select: `?state=NEW&state=RETRY`. `sort=field,dir` where field ∈ `id / createdAt / state` and dir ∈ `asc / desc`; default `id,desc`. |
+| `GET` | `/workflows?state=&page=&size=&sort=` | Paged list. `state` repeats for multi-select: `?state=NEW&state=RETRY`. Accepts virtual values `IN_QUEUE` / `WAITING` / `RUNNING` (single-state filters only — the UI never mixes them with others). `sort=field,dir` where field ∈ `id / createdAt / state` and dir ∈ `asc / desc`; default `id,desc`. |
 | `GET` | `/workflows/{id}` | Single workflow record. |
 | `GET` | `/workflows/{id}/activities` | All activity attempts for a workflow, ordered by `startedAt`. |
 | `GET` | `/last-activities?ids=1,2,3` | Latest activity per workflow id: `{name, attempt, lastAttemptAt}`. Used by the dashboard. |
@@ -314,7 +315,7 @@ The dashboard is a React SPA (`frontend/`) — Vite + TypeScript (strict) + TanS
 
 #### Workflows page (`/workflows`)
 - **Executor (Thread Pool)** panel — workers (active vs. free / max) and executor queue depth (current vs. slot capacity). Note: the executor queue capacity (default 100) is the number of tasks the thread pool can buffer internally — it is separate from the number of workflows waiting in the database. Backed by `GET /pool`.
-- **Stats cards** — `ALL`, `NEW`, `In Queue`, `Waiting`, `Retry`, `STOPPED`, `FINISHED`, `FAILED`. `In Queue` and `Waiting` both filter the list by `RETRY` in the DB. Cmd/Ctrl-click to multi-select; plain click replaces.
+- **Stats cards** — `ALL`, `NEW`, `Ready to run`, `Waiting retry`, `Running`, `STOPPED`, `FINISHED`, `FAILED`. `Ready to run` and `Waiting retry` filter the list by `RETRY` in the DB (split by `nextRetryAt`); `Running` filters by the in-memory runtime registry — only ids the executor has actually started on a worker thread (not those still queued inside the executor). Cmd/Ctrl-click to multi-select; plain click replaces.
 - **Workflow list** — TanStack Table with id, type, state, **relative-time** Created / Last run / Next run (auto-updating, hover for absolute timestamp), current activity name, attempts, error. Click any header on `id`/`createdAt`/`state` to sort (server-side).
 - **Pagination** — page-size picker (10 / 20 / 50 / 100), persisted in `localStorage`.
 - **Multi-select + bulk actions** — checkbox column on each row. When ≥1 workflow is selected, a sticky `BulkActionBar` appears: `Run now`, `Stop`, `Resume`, `Restart`, plus "By time range…" which builds a `{from, to, states}` filter and dispatches against `/workflows/bulk/*`. Destructive actions (Restart) confirm before firing.
@@ -480,7 +481,7 @@ The migrator runs on startup, scans the classpath for `db/migration/temporal-min
 
 ### Concurrency
 
-The scheduler tracks in-flight workflow ids in a `ConcurrentHashMap` so the same workflow is never queued twice across overlapping polls. Within a single workflow, activities are sequential — there is no parallelism inside `run()`.
+The scheduler tracks in-flight workflow ids in a `ConcurrentHashMap` (`WorkflowRuntimeRegistry`) so the same workflow is never queued twice across overlapping polls. Each entry carries a status: `SUBMITTED` is set when the scheduler calls `executor.execute(...)` (and is enough to block re-submission), and is flipped to `RUNNING` from inside the worker right before `engine.run(id)` — so the "RUNNING" view reflects what is actually executing, not what is still buffered in the executor's task queue. Within a single workflow, activities are sequential — there is no parallelism inside `run()`.
 
 If you run multiple application instances against the same database, all of them will poll. The current implementation does **not** have row-level locking, so a workflow could in theory be picked up by two instances at once. For multi-instance deployments, either run a single scheduler (`workflow.scheduler.enabled=false` on the others) or wrap the polling query in a `SELECT ... FOR UPDATE SKIP LOCKED` (extension point, not provided out of the box).
 

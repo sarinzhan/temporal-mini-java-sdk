@@ -9,6 +9,7 @@ import { BulkActionBar } from '../components/BulkActionBar/BulkActionBar';
 import { useWorkflows } from '../hooks/useWorkflows';
 import { useStats } from '../hooks/useStats';
 import { useLastActivities } from '../hooks/useLastActivities';
+import { useRuntime } from '../hooks/useRuntime';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const PAGE_SIZE_KEY = 'temporal-mini.pageSize';
@@ -42,6 +43,7 @@ export function WorkflowsPage() {
   const list = useWorkflows({ page, size: pageSize, states, sort: sortParam });
   const ids = list.data?.content?.map((w) => w.id) ?? [];
   const lastActs = useLastActivities(ids);
+  const runtime = useRuntime();
 
   function handleStatesChange(next: string[]) {
     setStates(next);
@@ -66,6 +68,7 @@ export function WorkflowsPage() {
           <WorkflowTable
             data={list.data}
             lastActivities={lastActs.data ?? {}}
+            runtime={runtime.data ?? {}}
             page={page}
             pageSize={pageSize}
             pageSizeOptions={PAGE_SIZE_OPTIONS}
