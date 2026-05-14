@@ -21,6 +21,13 @@ public class WorkflowHistoryEntity {
     private Long workflowId;
     private LocalDateTime startedAt;
     private LocalDateTime finishedAt;
+    /**
+     * Milliseconds the workflow spent waiting after it became eligible to run
+     * (either {@code nextRetryAt} for retries or {@code createdAt} for first runs)
+     * before this pickup actually started executing on a worker. Includes scheduler
+     * poll latency + time queued inside the executor before a worker grabbed it.
+     */
+    private Long pickupDelayMs;
     /** {@code FINISHED} / {@code RETRY} / {@code FAILED}; {@code null} while the run is in flight. */
     private String outcome;
     /** {@link WorkflowState} of the workflow when this pickup started. */

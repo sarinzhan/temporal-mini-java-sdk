@@ -76,6 +76,12 @@ public class WorkflowEngine {
      * <p>Note: there is no "currently running" persisted state. "In-flight" execution is
      * tracked separately via {@link WorkflowRuntimeRegistry} — see {@link WorkflowState}
      * javadoc for the rationale.
+     *
+     * <p>Each invocation also appends one row to {@code wflow.workflow_history} (created
+     * at entry, finalized on exit with the outcome). Every {@code saveActivity(...)}
+     * inside this run mirrors itself into {@code wflow.activity_history}. These tables
+     * are append-only and survive {@link #restart(Long)} / {@link #restartFromActivity}
+     * — see the "Database schema" section of the README.
      */
     public void run(Long workflowId) {
         WorkflowEntity entity = workflowRepository.findById(workflowId).orElseThrow();
@@ -83,15 +89,24 @@ public class WorkflowEngine {
             log.debug("[{}:{}] skipped — STOPPED", entity.getWorkflowType(), workflowId);
             return;
         }
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime eligibleAt = entity.getNextRetryAt() != null
+                ? entity.getNextRetryAt()
+                : entity.getCreatedAt();
+        long pickupDelayMs = eligibleAt != null
+                ? Math.max(0L, java.time.Duration.between(eligibleAt, now).toMillis())
+                : 0L;
+
         if (entity.getStartedAt() == null) {
-            entity.setStartedAt(LocalDateTime.now());
+            entity.setStartedAt(now);
         }
         entity.setNextRetryAt(null);
 
         WorkflowHistoryEntity hist = new WorkflowHistoryEntity();
         hist.setWorkflowId(workflowId);
-        hist.setStartedAt(LocalDateTime.now());
+        hist.setStartedAt(now);
         hist.setInitialState(entity.getState().name());
+        hist.setPickupDelayMs(pickupDelayMs);
         hist = workflowHistoryRepository.save(hist);
 
         Workflow workflow = registry.get(entity.getWorkflowType());
@@ -101,6 +116,7 @@ public class WorkflowEngine {
         try {
             recordRun(entity.getWorkflowType(), workflow, ctx);
             entity.setState(WorkflowState.FINISHED);
+            entity.setFinishedAt(LocalDateTime.now());
             log.info("[{}:{}] FINISHED", entity.getWorkflowType(), workflowId);
         } catch (ActivityException ex) {
             if (entity.getNextRetryAt() != null) {
@@ -186,6 +202,7 @@ public class WorkflowEngine {
         activityRepository.deleteByWorkflowId(workflowId);
         entity.setState(WorkflowState.RETRY);
         entity.setStartedAt(null);
+        entity.setFinishedAt(null);
         entity.setErrorMessage(null);
         entity.setNextRetryAt(LocalDateTime.now());
         workflowRepository.save(entity);
@@ -212,6 +229,7 @@ public class WorkflowEngine {
         int deleted = activityRepository.deleteByWorkflowIdAndStartedAtGreaterThanEqual(
                 workflowId, pivot.getStartedAt());
         entity.setState(WorkflowState.RETRY);
+        entity.setFinishedAt(null);
         entity.setErrorMessage(null);
         entity.setNextRetryAt(LocalDateTime.now());
         workflowRepository.save(entity);

@@ -34,5 +34,7 @@ public class ActivityHistoryEntity {
     private String inputPayload;
     @Column(columnDefinition = "text")
     private String outputPayload;
+    /** Fully-qualified class name of the deserialized {@code outputPayload}. */
+    private String outputType;
     private String errorMessage;
 }

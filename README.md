@@ -66,14 +66,17 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 | `WorkflowScheduler` | `@Scheduled` poller that picks up `NEW` and `RETRY` (when `nextRetryAt <= now`) workflows and submits them to the executor. |
 | `workflowExecutor` | Bounded `ThreadPoolTaskExecutor`. Runs workflows in parallel. |
 | `WorkflowRuntimeRegistry` | In-memory tracker for ids the scheduler has handed to the executor. Distinguishes `SUBMITTED` (in the executor's queue) from `RUNNING` (worker thread actually executing); the latter powers the UI's `RUNNING` state and the `runtimeCount` metric. Also acts as a deduplication guard across overlapping polls. |
-| `WorkflowRepository` / `ActivityRepository` | Spring Data JPA repos. Two tables: `wflow.workflow`, `wflow.activity`. |
+| `WorkflowRepository` / `ActivityRepository` | Spring Data JPA repos for the live tables: `wflow.workflow`, `wflow.activity`. |
+| `WorkflowHistoryRepository` / `ActivityHistoryRepository` | Spring Data JPA repos for the append-only audit tables: `wflow.workflow_history` (one row per `engine.run()` pickup), `wflow.activity_history` (mirror of every activity attempt). See [Database schema](#database-schema). |
 | `ActivityMetrics` / `WorkflowMetrics` | Optional Micrometer instrumentation. Auto-registered when a `MeterRegistry` is present on the classpath. |
 | `WorkflowUiController` | REST API at `/temporal-mini/api/**`: workflows, stats, pool, control actions. |
 | `AuthController` (optional) | JSON login/logout/me at `/temporal-mini/api/auth/**` — wired only when auth is enabled. |
 | `SpaController` | Redirects `/temporal-mini` → `/temporal-mini/ui/` and serves the SPA's `index.html` for deep links. |
 | React SPA | Dashboard at `/temporal-mini/ui/` (Vite + TypeScript + TanStack Query/Table + Material UI + React Router). |
 
-**Replay model** — at the start of every run, the engine re-executes `Workflow.run()` from scratch. Each `ctx.activity(name, ...)` call first checks `wflow.activity` for a row with `success = true` and the same `name` for this workflow. If found, it returns the cached result without invoking your function. Only failed/missing activities actually execute. This is how durability is achieved without storing intermediate state.
+**Replay model** — at the start of every run, the engine re-executes `Workflow.run()` from scratch. Each `ctx.activity(name, ...)` call first checks `wflow.activity` for the row matching this workflow + name; if `success = true`, it returns the cached output without invoking your function. Otherwise the engine runs the function and **upserts** the row (the same `(workflow_id, name)` row is updated in place across retries, so the live table stays slim — one row per activity per workflow). Failed and successful attempts alike are also appended to `wflow.activity_history` for the full audit trail.
+
+> The replay-cache only reads `wflow.activity` (the live table). The `*_history` tables are written in parallel but never consulted by the engine — they exist purely as an immutable audit trail for the UI / operators.
 
 > **Activity names must be unique within a workflow.** Two activities with the same name in the same workflow will collide on replay.
 
@@ -127,13 +130,13 @@ public class SendInvoiceWorkflow implements Workflow {
 
     @Override
     public void run(WorkflowContext ctx) {
-        Invoice invoice = ctx.activity("fetch-invoice", Invoice.class,
+        Invoice invoice = ctx.activity("fetch-invoice",
                 RetryPolicy.exponential(5, 1_000),
                 () -> billing.fetch(/* ... */));
 
-        ctx.activity("email-customer",
+        ctx.activity("email-customer", invoice,
                 RetryPolicy.fixed(3, 30_000),
-                () -> email.send(invoice));
+                inv -> { email.send(inv); return null; });
     }
 }
 ```
@@ -169,15 +172,23 @@ A workflow is a deterministic sequence of `activity(...)` calls. The engine guar
 3. When all activities have succeeded, the workflow transitions to `FINISHED`.
 4. When an activity exhausts its retries, the workflow transitions to `FAILED`.
 
-There are two `activity(...)` overloads:
+There are three `activity(...)` overloads:
 
 ```java
-// Returns a result (serialized to JSON in the activity table)
-T activity(String name, Class<T> resultType, RetryPolicy policy, Supplier<T> fn);
+// Run with a typed input. Input is JSON-serialized into wflow.activity.input_payload
+// and the same instance is passed to the function. Output type is captured at runtime
+// (via result.getClass()) and stored alongside the JSON in output_type so replay can
+// deserialize back without you having to pass a Class<O> token.
+<I, O> O activity(String name, I input, RetryPolicy policy, Function<I, O> fn);
 
-// No return value
+// No input. Output handling identical to the above.
+<T> T activity(String name, RetryPolicy policy, Supplier<T> fn);
+
+// Side-effecting only; nothing stored in output_payload/output_type.
 void activity(String name, RetryPolicy policy, Runnable fn);
 ```
+
+> The replay-cache uses {@code output_type} (a fully-qualified class name persisted on first success) to deserialize the cached JSON back to a typed Java object. If the class is later renamed/removed from the classpath, replay throws `IllegalStateException` — the operator should `restart` the workflow.
 
 ### Best practices
 
@@ -258,8 +269,8 @@ The UI shows three additional **derived** views, computed server-side:
 - `engine.runNow(id)` — sets `nextRetryAt = now`. If the workflow is `FAILED` or `STOPPED`, also flips it to `RETRY`. Forbidden on `FINISHED`.
 - `engine.stop(id)` — `NEW` or `RETRY` → `STOPPED`. Forbidden on terminal states.
 - `engine.resume(id)` — `STOPPED` or `FAILED` → `RETRY` and queues for immediate pickup.
-- `engine.restart(id)` — wipes every activity row for this workflow and resets state to `RETRY`. Allowed in any state. **Destructive** — operators should confirm.
-- `engine.restartFromActivity(id, activityId)` — deletes activity rows whose `startedAt >= chosen.startedAt` (the pivot and everything after it), resets state to `RETRY`. Earlier successful activities stay cached.
+- `engine.restart(id)` — wipes every activity row for this workflow and resets state to `RETRY`. Allowed in any state. **Destructive** for the live replay cache, but `wflow.activity_history` rows are preserved (with their `activity_id` set to `NULL` by the FK).
+- `engine.restartFromActivity(id, activityId)` — deletes activity rows whose `startedAt >= chosen.startedAt` (the pivot and everything after it), resets state to `RETRY`. Earlier successful activities stay cached. History rows for deleted activities are preserved in `wflow.activity_history`.
 - Bulk variants — `stopAll`, `resumeAll`, `restartAll`, `runNowAll` — accept a `Collection<Long>` and return the number of workflows successfully transitioned. Illegal transitions are skipped silently.
 - Payload editing — `engine.setPayload(id, ...)` (allowed in `NEW`/`RETRY`/`STOPPED`/`FAILED`); `engine.setActivityPayload(id, activityId, payload, output)` for an activity's input or output (no state check — operator's responsibility).
 
@@ -468,14 +479,24 @@ npm run dev         # dev server on :5173 with API proxy to :8080
 
 ### Database schema
 
-`temporal-mini` owns the `wflow` schema with four tables:
+`temporal-mini` owns the `wflow` schema with six tables — two live, two history mirrors, plus metrics and migrator bookkeeping:
 
-- `wflow.workflow` — one row per workflow (state, payload, retry timestamp, error). The `state` column stores `"BLOCKED"` for `STOPPED` and will transparently read `"RUNNABLE"` as `RETRY` for backward compatibility with older rows.
-- `wflow.activity` — one row per **attempt** (workflow id, name, attempt #, success, payloads, error).
+Live (mutated by the engine, drive replay-cache):
+
+- `wflow.workflow` — one row per workflow. `started_at` is set on the first pickup; `finished_at` is set **only** when the workflow reaches `FINISHED` (it stays `NULL` for `FAILED`/`STOPPED`/in-flight). The `state` column stores `"BLOCKED"` for `STOPPED` and will transparently read `"RUNNABLE"` as `RETRY` for backward compatibility with older rows.
+- `wflow.activity` — one row per **(workflow id, activity name)**: the engine upserts this row on each attempt so it always reflects the latest state (`attempt` = latest attempt number, `success` = latest outcome, `started_at` = first-attempt start, `input_payload`/`output_payload`/`output_type`/`error_message` = latest values). `output_type` stores the FQN of the cached output's runtime class so replay can deserialize without a `Class<O>` token from the caller. `finished_at` is set **only** when the activity has successfully completed; while it is still retrying it stays `NULL`. Wiped by `engine.restart()` and `engine.restartFromActivity()`. The per-attempt audit lives in `wflow.activity_history`.
+
+History (append-only audit, never mutated, never deleted by `restart*`):
+
+- `wflow.workflow_history` — one row per call to `WorkflowEngine.run(Long)` (one scheduler pickup). Inserted at the start of the run, updated at the end with `finished_at`, `outcome` (`FINISHED`/`RETRY`/`FAILED`), `next_retry_at`, and `error_message`. `initial_state` records what state the workflow was in when this pickup began. `pickup_delay_ms` records how long the workflow was waiting between becoming eligible to run (`nextRetryAt` for retries, `createdAt` for first runs) and this pickup actually starting on a worker — captures scheduler poll latency plus executor-queue wait.
+- `wflow.activity_history` — one row per individual activity attempt. The live `wflow.activity` row is upserted in place across retries, but this table always **appends** a fresh row per attempt (so you can see "attempt 1 failed at T1, attempt 2 failed at T2, attempt 3 succeeded at T3" even though the live table only carries the latest snapshot). Has FKs to `wflow.workflow_history` (the wrapping pickup), `wflow.workflow` (the parent workflow), and `wflow.activity` (the live row). The `activity_id` FK uses `ON DELETE SET NULL` so `engine.restart()` can still wipe live activity rows — the history row survives with a null `activity_id` and intact `workflow_id` / `workflow_history_id`.
+
+Bookkeeping:
+
 - `wflow.metric_sample` — one row per metrics snapshot (timestamp PK, pool/queue counters and per-state counts including `cnt_retry`).
-- `wflow.sql_migrations` — bookkeeping table for the built-in migrator: applied version, name, applied-at timestamp.
+- `wflow.sql_migrations` — applied version, name, applied-at timestamp.
 
-The migrator runs on startup, scans the classpath for `db/migration/temporal-mini/V*__*.sql`, applies any pending versions in order (each in its own transaction), and inserts a row into `wflow.sql_migrations`. Indexes (`idx_workflow_state_retry`, `idx_activity_workflow_name`, `idx_metric_sample_ts`) are created by those migrations.
+The migrator runs on startup, scans the classpath for `db/migration/temporal-mini/V*__*.sql`, applies any pending versions in order (each in its own transaction), and inserts a row into `wflow.sql_migrations`. Indexes — `idx_workflow_state_retry`, `idx_activity_workflow_name`, `idx_metric_sample_ts`, `idx_workflow_history_workflow_id_started`, `idx_activity_history_workflow_history_id`, `idx_activity_history_workflow_id_name`, `idx_activity_history_activity_id` — are created by those migrations. `V6` adds the nullable `wflow.workflow.finished_at` and `wflow.workflow_history.pickup_delay_ms` columns. `V7` adds `output_type VARCHAR(512)` to `wflow.activity` and `wflow.activity_history` so the engine can deserialize cached outputs on replay without the caller passing a `Class<O>` token.
 
 > **Upgrading from a Flyway-era deployment.** Old installations have a `flyway_temporal_mini_history` table that the new migrator ignores. Once the new migrator has run successfully (check `SELECT * FROM wflow.sql_migrations`) you can drop the legacy table by hand: `DROP TABLE wflow.flyway_temporal_mini_history;`.
 
@@ -547,7 +568,7 @@ The activity row is only written **after** the function returns or throws. A cra
 Yes — `String` is just JSON in practice. The framework doesn't interpret it; deserialize it yourself in `run()`.
 
 **How do I share results between activities?**
-Use the return value: `Order order = ctx.activity("fetch", Order.class, ...);`. The result is serialized once on success and replayed on retry.
+Use the return value: `Order order = ctx.activity("fetch", policy, () -> backend.load(id));`. The result is serialized once on success and replayed on retry — the engine remembers the runtime class so you don't pass a `Class<O>` token. Pass the result as the input of the next activity (`ctx.activity("ship", order, policy, o -> shipper.send(o))`) — both the input and output get persisted for audit.
 
 **Can I run code outside an activity in `run()`?**
 You can, but remember it runs on every replay. Keep it deterministic and side-effect-free (e.g. routing logic, parsing the input payload).

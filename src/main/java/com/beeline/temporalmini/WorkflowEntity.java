@@ -19,6 +19,8 @@ public class WorkflowEntity {
     private String nextPayload;
     private LocalDateTime createdAt;
     private LocalDateTime startedAt;
+    /** Set only when the workflow transitions to {@link WorkflowState#FINISHED}. */
+    private LocalDateTime finishedAt;
     private LocalDateTime nextRetryAt;
     @Column(columnDefinition = "text")
     private String errorMessage;

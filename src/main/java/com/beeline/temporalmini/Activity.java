@@ -22,5 +22,7 @@ public class Activity {
     private String inputPayload;
     @Column(columnDefinition = "text")
     private String outputPayload;
+    /** Fully-qualified class name of the deserialized {@code outputPayload}; used by replay to reconstruct the typed result. */
+    private String outputType;
     private String errorMessage;
 }
