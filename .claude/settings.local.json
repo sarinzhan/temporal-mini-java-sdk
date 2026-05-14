@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(Get-ChildItem -Recurse \"C:\\\\Users\\\\Sarinzhan\\\\IdeaProjects\\\\temporal-mini-java-sdk\\\\frontend\\\\src\" -Directory)",
-      "Bash(Select-Object FullName)"
+      "Bash(Select-Object FullName)",
+      "PowerShell(head *)"
     ]
   }
 }

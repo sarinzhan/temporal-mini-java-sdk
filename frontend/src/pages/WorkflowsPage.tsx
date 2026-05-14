@@ -4,6 +4,7 @@ import { Container, Stack } from '@mui/material';
 import { Header } from '../components/Header/Header';
 import { StatsCards } from '../components/StatsCards/StatsCards';
 import { PoolGauge } from '../components/PoolGauge/PoolGauge';
+import { ClusterPanel } from '../components/ClusterPanel/ClusterPanel';
 import { WorkflowTable } from '../components/WorkflowTable/WorkflowTable';
 import { BulkActionBar } from '../components/BulkActionBar/BulkActionBar';
 import { useWorkflows } from '../hooks/useWorkflows';
@@ -61,6 +62,7 @@ export function WorkflowsPage() {
       <Container maxWidth="xl" sx={{ py: 3 }}>
         <Stack spacing={2}>
           <PoolGauge />
+          <ClusterPanel />
           <StatsCards stats={stats.data} selected={states} onChange={handleStatesChange} />
           {selectedIds.length > 0 && (
             <BulkActionBar selectedIds={selectedIds} onClear={() => setRowSelection({})} />

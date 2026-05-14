@@ -2,31 +2,35 @@ package com.beeline.temporalmini;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.concurrent.Executor;
 
 @Slf4j
 public class WorkflowScheduler {
 
-    private final WorkflowEngine engine;
     private final WorkflowRepository workflowRepository;
-    private final Executor executor;
+    private final ThreadPoolTaskExecutor executor;
     private final WorkflowRuntimeRegistry runtimeRegistry;
+    private final WorkflowExecutor workflowExecutor;
 
-    public WorkflowScheduler(WorkflowEngine engine,
-                             WorkflowRepository workflowRepository,
-                             Executor executor,
-                             WorkflowRuntimeRegistry runtimeRegistry) {
-        this.engine = engine;
+    public WorkflowScheduler(WorkflowRepository workflowRepository,
+                             ThreadPoolTaskExecutor executor,
+                             WorkflowRuntimeRegistry runtimeRegistry,
+                             WorkflowExecutor workflowExecutor) {
         this.workflowRepository = workflowRepository;
         this.executor = executor;
         this.runtimeRegistry = runtimeRegistry;
+        this.workflowExecutor = workflowExecutor;
     }
 
-    @Scheduled(fixedDelayString = "${workflow.scheduler.interval-ms:5000}")
+    @Scheduled(fixedDelayString = "${workflow.scheduler.interval-ms:2000}")
     public void poll() {
+        if (executor.getThreadPoolExecutor().getQueue().remainingCapacity() == 0) {
+            log.debug("Scheduler: executor queue full, skipping poll");
+            return;
+        }
         List<WorkflowEntity> pending = workflowRepository.findPendingWorkflows(LocalDateTime.now());
         if (pending.isEmpty()) {
             log.debug("Scheduler: no pending workflows");
@@ -34,15 +38,14 @@ public class WorkflowScheduler {
         }
         int submitted = 0;
         for (WorkflowEntity w : pending) {
+            if (executor.getThreadPoolExecutor().getQueue().remainingCapacity() == 0) break;
             Long id = w.getId();
             if (!runtimeRegistry.tryStart(id)) continue;
             submitted++;
             executor.execute(() -> {
                 runtimeRegistry.markRunning(id);
                 try {
-                    engine.run(id);
-                } catch (Exception ex) {
-                    log.error("Scheduler: unexpected error running workflow {}", id, ex);
+                    workflowExecutor.tryExecute(id);
                 } finally {
                     runtimeRegistry.finish(id);
                 }

@@ -22,6 +22,7 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 - [Web UI](#web-ui)
 - [Authentication](#authentication)
 - [Configuration reference](#configuration-reference)
+- [Multi-instance deployment](#multi-instance-deployment)
 - [Building the UI](#building-the-ui)
 - [Operations](#operations)
 - [FAQ](#faq)
@@ -63,13 +64,17 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 | `WorkflowEngine` | Starts, runs, stops/resumes/restarts workflows (single + bulk). Resolves `Workflow` beans into a registry. |
 | `TemporalMiniSchemaMigrator` | Tiny forward-only SQL migrator. Reads `db/migration/temporal-mini/V*__*.sql` from the classpath and tracks applied versions in `wflow.sql_migrations`. Replaces Flyway. |
 | `MetricsSampler` | `@Scheduled` snapshot writer for the metrics chart — appends a row to `wflow.metric_sample` every 10s and trims older rows on a daily cron. |
-| `WorkflowScheduler` | `@Scheduled` poller that picks up `NEW` and `RETRY` (when `nextRetryAt <= now`) workflows and submits them to the executor. |
+| `WorkflowScheduler` | `@Scheduled` poller that picks up `NEW` and `RETRY` (when `nextRetryAt <= now`) workflows. Before polling, checks `executor.getQueue().remainingCapacity()` — if the pool's internal queue is full, the poll is skipped entirely. Submits ready ids to the thread pool. |
+| `WorkflowExecutor` | Wraps `engine.run()` in a `@Transactional` that starts with `SELECT … FOR UPDATE SKIP LOCKED` — so only one instance across a cluster can hold the row lock and execute a given workflow at a time. The lock is held for the full duration of the run and released on commit. |
 | `workflowExecutor` | Bounded `ThreadPoolTaskExecutor`. Runs workflows in parallel. |
-| `WorkflowRuntimeRegistry` | In-memory tracker for ids the scheduler has handed to the executor. Distinguishes `SUBMITTED` (in the executor's queue) from `RUNNING` (worker thread actually executing); the latter powers the UI's `RUNNING` state and the `runtimeCount` metric. Also acts as a deduplication guard across overlapping polls. |
+| `WorkflowRuntimeRegistry` | In-memory tracker for ids the scheduler has handed to the executor. Distinguishes `SUBMITTED` (in the executor's queue) from `RUNNING` (worker thread actually executing); the latter powers the UI's `RUNNING` state and the `runtimeCount` metric. Also acts as a deduplication guard across overlapping polls **on the same instance**. |
+| `InstanceRegistryService` | Registers this instance in `wflow.instance_registry` on startup (`@PostConstruct`), deregisters on shutdown (`@PreDestroy`), and refreshes `last_heartbeat` every 10 s. Activated only when `workflow.instance.url` is set. |
 | `WorkflowRepository` / `ActivityRepository` | Spring Data JPA repos for the live tables: `wflow.workflow`, `wflow.activity`. |
 | `WorkflowHistoryRepository` / `ActivityHistoryRepository` | Spring Data JPA repos for the append-only audit tables: `wflow.workflow_history` (one row per `engine.run()` pickup), `wflow.activity_history` (mirror of every activity attempt). See [Database schema](#database-schema). |
 | `ActivityMetrics` / `WorkflowMetrics` | Optional Micrometer instrumentation. Auto-registered when a `MeterRegistry` is present on the classpath. |
 | `WorkflowUiController` | REST API at `/temporal-mini/api/**`: workflows, stats, pool, control actions. |
+| `NodeStateController` | `GET /internal/state` — returns this instance's live state: node id, URL, executor queue depth, active thread count, running workflow ids. |
+| `UiAggregatorController` | `GET /ui/state` — reads all live instances from `wflow.instance_registry` (`last_heartbeat > now − 30 s`) and fans out a `GET /internal/state` call to each via `RestClient`. Returns an aggregated view. Any instance in the cluster can serve as the aggregator. |
 | `AuthController` (optional) | JSON login/logout/me at `/temporal-mini/api/auth/**` — wired only when auth is enabled. |
 | `SpaController` | Redirects `/temporal-mini` → `/temporal-mini/ui/` and serves the SPA's `index.html` for deep links. |
 | React SPA | Dashboard at `/temporal-mini/ui/` (Vite + TypeScript + TanStack Query/Table + Material UI + React Router). |
@@ -314,18 +319,19 @@ The dashboard is a React SPA (`frontend/`) — Vite + TypeScript (strict) + TanS
 
 | Folder | What lives there |
 |---|---|
-| `frontend/src/api/` | REST client (`client.ts`, base URL is dynamic) + per-resource modules (`workflows.ts`, `auth.ts`, `pool.ts`, `controls.ts`, `metrics.ts`, `edits.ts`). |
-| `frontend/src/hooks/` | One TanStack Query hook per query (`useWorkflows`, `useStats`, `usePool`, `useWorkflow`, `useActivities`, `useLastActivities`, `useMetricsHistory`); mutations live in `useWorkflowControls` (run/stop/resume/restart + bulk) and `useEditPayload`. |
+| `frontend/src/api/` | REST client (`client.ts`, base URL is dynamic) + per-resource modules (`workflows.ts`, `auth.ts`, `pool.ts`, `controls.ts`, `metrics.ts`, `edits.ts`, `cluster.ts`). |
+| `frontend/src/hooks/` | One TanStack Query hook per query (`useWorkflows`, `useStats`, `usePool`, `useWorkflow`, `useActivities`, `useLastActivities`, `useMetricsHistory`, `useCluster`); mutations live in `useWorkflowControls` (run/stop/resume/restart + bulk) and `useEditPayload`. |
 | `frontend/src/contexts/` | `AuthContext` (login/logout/me; auto-rechecks on backend switch), `RefreshIntervalContext` (manual polling cadence in `localStorage`), `BackendContext` (list of API base URLs the operator can switch between). |
 | `frontend/src/pages/` | `LoginPage`, `WorkflowsPage`, `WorkflowDetailsPage`, `MetricsPage`. |
-| `frontend/src/components/` | Presentational pieces: `Header/` (tabs + backend select + refresh select), `StatsCards/`, `PoolGauge/`, `WorkflowTable/`, `WorkflowControls/`, `BulkActionBar/`, `ActivityList/`, `JsonViewer/`, `StatusBadge/`, `RelativeTime/`, `PayloadEditDialog/`, `MetricsCharts/`, `Toast/`, `ProtectedRoute.tsx`. |
-| `frontend/src/types/` | Shared TS interfaces for `Workflow`, `Activity`, `PoolStats`, `AuthUser`, `MetricSample`. |
+| `frontend/src/components/` | Presentational pieces: `Header/` (tabs + backend select + refresh select), `StatsCards/`, `PoolGauge/`, `ClusterPanel/`, `WorkflowTable/`, `WorkflowControls/`, `BulkActionBar/`, `ActivityList/`, `JsonViewer/`, `StatusBadge/`, `RelativeTime/`, `PayloadEditDialog/`, `MetricsCharts/`, `Toast/`, `ProtectedRoute.tsx`. |
+| `frontend/src/types/` | Shared TS interfaces for `Workflow`, `Activity`, `PoolStats`, `AuthUser`, `MetricSample`, `cluster` (`NodeState`, `AggregatedState`, `RunningTaskDto`). |
 | `frontend/src/utils/` | `format.ts` (date helpers), `baseUrl.ts` (dynamic API base URL store), `toastBus.ts` (global error toast emitter). |
 
 ### Features
 
 #### Workflows page (`/workflows`)
 - **Executor (Thread Pool)** panel — workers (active vs. free / max) and executor queue depth (current vs. slot capacity). Note: the executor queue capacity (default 100) is the number of tasks the thread pool can buffer internally — it is separate from the number of workflows waiting in the database. Backed by `GET /pool`.
+- **Cluster** panel — visible only when `workflow.instance.url` is configured and `GET /ui/state` returns at least one live instance. Shows: total live instance count (green chip), aggregate active workers / queued tasks / running workflows across the cluster. Each instance is listed with its URL, a per-instance worker gauge, queue depth, and running count. Clicking an instance row expands a list of currently running workflow ids and how long each has been executing. Backed by `GET /ui/state`.
 - **Stats cards** — `ALL`, `NEW`, `Ready to run`, `Waiting retry`, `Running`, `STOPPED`, `FINISHED`, `FAILED`. `Ready to run` and `Waiting retry` filter the list by `RETRY` in the DB (split by `nextRetryAt`); `Running` filters by the in-memory runtime registry — only ids the executor has actually started on a worker thread (not those still queued inside the executor). Cmd/Ctrl-click to multi-select; plain click replaces.
 - **Workflow list** — TanStack Table with id, type, state, **relative-time** Created / Last run / Next run (auto-updating, hover for absolute timestamp), current activity name, attempts, error. Click any header on `id`/`createdAt`/`state` to sort (server-side).
 - **Pagination** — page-size picker (10 / 20 / 50 / 100), persisted in `localStorage`.
@@ -408,12 +414,13 @@ To use multiple users, an external user store, or LDAP, define your own `UserDet
 | Property | Default | Purpose |
 |---|---|---|
 | `workflow.scheduler.enabled` | `true` | Turn the polling scheduler on/off. |
-| `workflow.scheduler.interval-ms` | `5000` | Poll interval (`@Scheduled` fixed delay). |
+| `workflow.scheduler.interval-ms` | `2000` | Poll interval (`@Scheduled` fixed delay). |
 | `workflow.scheduler.pool-size` | CPU count | Worker thread pool size. |
-| `workflow.scheduler.queue-capacity` | `100` | Executor task queue capacity before back-pressure (`CallerRunsPolicy`) kicks in. |
+| `workflow.scheduler.queue-capacity` | `100` | Executor task queue capacity. When full, the scheduler skips the poll entirely (back-pressure). |
 | `workflow.scheduler.thread-name-prefix` | `wflow-` | Prefix for worker thread names. |
+| `workflow.instance.url` | _(unset)_ | Public URL of this instance, e.g. `http://app1:8080`. **Required for multi-instance mode.** When set, `InstanceRegistryService`, `NodeStateController`, and `UiAggregatorController` are activated. |
 | `temporal-mini.ui.enabled` | `true` | Mount the REST API + dashboard. |
-| `workflow.ui.security.enabled` | `false` | Require login for `/temporal-mini/**`. Needs Spring Security on the classpath. |
+| `workflow.ui.security.enabled` | `false` | Require login for `/temporal-mini/**`, `/internal/**`, `/ui/**`. Needs Spring Security on the classpath. |
 | `workflow.ui.username` | `admin` | Username of the single in-memory user provisioned when security is enabled. |
 | `workflow.ui.password` | `{noop}admin` | Password (with `{encoder}` prefix). Override in production. |
 | `workflow.metrics.enabled` | `true` | Append a row to `wflow.metric_sample` on the configured cadence; powers the metrics chart. |
@@ -438,6 +445,91 @@ The default thread pool is intentionally **not** `Executors.newCachedThreadPool(
 - **graceful shutdown** — `waitForTasksToCompleteOnShutdown=true`, `awaitTerminationSeconds=30`.
 
 Tune `pool-size` based on what your activities do: if they're CPU-heavy, stick close to `cpu count`; if they're mostly I/O (HTTP, DB), `2 × cpu count` to `4 × cpu count` is reasonable.
+
+---
+
+## Multi-instance deployment
+
+`temporal-mini` supports running multiple application instances against the same PostgreSQL database. All instances share the same workflow queue — no configuration is needed to split work among them. Duplicate execution is prevented at the database level.
+
+### How it works
+
+```
+┌────────────┐   poll every 2s    ┌──────────────────────────────────┐
+│  Instance 1│ ─────────────────► │         wflow.workflow           │
+│            │   SELECT FOR UPDATE│  id │ state │ next_retry_at ...  │
+│ Scheduler  │   SKIP LOCKED      └──────────────────────────────────┘
+│ Executor   │ ◄──── row lock ─────────────┐
+└────────────┘                             │  same id, locked — skip
+┌────────────┐   poll every 2s             │
+│  Instance 2│ ─────────────────────────── ┘
+│ Scheduler  │
+│ Executor   │
+└────────────┘
+```
+
+1. Each scheduler polls `findPendingWorkflows()` independently (plain `SELECT`, no lock).
+2. Before submitting each id to the thread pool, the scheduler checks `executor.getQueue().remainingCapacity()` — if the pool is already saturated it skips the entire poll.
+3. When a worker picks up an id it calls `WorkflowExecutor.tryExecute(id)`, which is a single `@Transactional` method:
+   - issues `SELECT … FOR UPDATE SKIP LOCKED WHERE id = :id`;
+   - if 0 rows returned (another instance won the lock) — returns immediately;
+   - if row returned — calls `engine.run(id)` in the same transaction, holding the lock until commit.
+4. Within one instance, `WorkflowRuntimeRegistry` additionally prevents the same id being submitted twice across overlapping scheduler polls (the `SUBMITTED` → `RUNNING` dedup guard).
+
+### Enabling instance registration
+
+Set `workflow.instance.url` to the network-reachable URL of each instance. This activates three additional beans: `InstanceRegistryService`, `NodeStateController`, and `UiAggregatorController`.
+
+```properties
+# application.properties (or env var INSTANCE_URL)
+workflow.instance.url=http://app1:8080
+```
+
+On startup the instance writes a row to `wflow.instance_registry` and refreshes `last_heartbeat` every 10 s. On shutdown it deletes the row. "Live" is defined as `last_heartbeat > now() − 30 s`.
+
+### New endpoints (active only when `workflow.instance.url` is set)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/internal/state` | Returns this node's live state: `nodeId`, `nodeUrl`, `queueSize` (executor queue depth), `activeCount` (running threads), `runningTasks` (list of `{workflowId, startedAtEpochMs}`). Secured under the same auth as `/temporal-mini/**`. |
+| `GET` | `/ui/state` | Reads live instances from `wflow.instance_registry`, fans out `GET /internal/state` to each via `RestClient`, and returns an aggregated `{nodes: [...]}`. Any instance in the cluster can be the aggregator. |
+
+### Docker Compose (3-instance example)
+
+A `Dockerfile` and `docker-compose.yml` are provided at the project root for local development and demo:
+
+```sh
+mvn package -Dfrontend.skip=false   # build the fat jar
+docker compose up --build            # starts postgres + app1 + app2 + app3
+```
+
+Instances listen on ports **8081 / 8082 / 8083**. Each instance receives its own `INSTANCE_URL` via an environment variable so Docker's internal DNS resolves inter-instance calls:
+
+```yaml
+app1:
+  environment:
+    INSTANCE_URL: http://app1:8080
+app2:
+  environment:
+    INSTANCE_URL: http://app2:8080
+app3:
+  environment:
+    INSTANCE_URL: http://app3:8080
+```
+
+Open `http://localhost:8081/temporal-mini/ui/` to see the dashboard — the **Cluster** panel will show all three instances.
+
+### Database schema addition
+
+`V8__instance_registry.sql` (applied automatically on first startup):
+
+```sql
+CREATE TABLE wflow.instance_registry (
+    id             VARCHAR(255) PRIMARY KEY,
+    url            VARCHAR(512) NOT NULL,
+    last_heartbeat TIMESTAMP    NOT NULL
+);
+```
 
 ---
 
@@ -494,17 +586,18 @@ History (append-only audit, never mutated, never deleted by `restart*`):
 Bookkeeping:
 
 - `wflow.metric_sample` — one row per metrics snapshot (timestamp PK, pool/queue counters and per-state counts including `cnt_retry`).
+- `wflow.instance_registry` — one row per live application instance (id, url, last_heartbeat). Written by `InstanceRegistryService`; only present when `workflow.instance.url` is configured. Used by `UiAggregatorController` to discover peers.
 - `wflow.sql_migrations` — applied version, name, applied-at timestamp.
 
-The migrator runs on startup, scans the classpath for `db/migration/temporal-mini/V*__*.sql`, applies any pending versions in order (each in its own transaction), and inserts a row into `wflow.sql_migrations`. Indexes — `idx_workflow_state_retry`, `idx_activity_workflow_name`, `idx_metric_sample_ts`, `idx_workflow_history_workflow_id_started`, `idx_activity_history_workflow_history_id`, `idx_activity_history_workflow_id_name`, `idx_activity_history_activity_id` — are created by those migrations. `V6` adds the nullable `wflow.workflow.finished_at` and `wflow.workflow_history.pickup_delay_ms` columns. `V7` adds `output_type VARCHAR(512)` to `wflow.activity` and `wflow.activity_history` so the engine can deserialize cached outputs on replay without the caller passing a `Class<O>` token.
+The migrator runs on startup, scans the classpath for `db/migration/temporal-mini/V*__*.sql`, applies any pending versions in order (each in its own transaction), and inserts a row into `wflow.sql_migrations`. Indexes — `idx_workflow_state_retry`, `idx_activity_workflow_name`, `idx_metric_sample_ts`, `idx_workflow_history_workflow_id_started`, `idx_activity_history_workflow_history_id`, `idx_activity_history_workflow_id_name`, `idx_activity_history_activity_id` — are created by those migrations. `V6` adds the nullable `wflow.workflow.finished_at` and `wflow.workflow_history.pickup_delay_ms` columns. `V7` adds `output_type VARCHAR(512)` to `wflow.activity` and `wflow.activity_history` so the engine can deserialize cached outputs on replay without the caller passing a `Class<O>` token. `V8` adds `wflow.instance_registry` for multi-instance coordination.
 
 > **Upgrading from a Flyway-era deployment.** Old installations have a `flyway_temporal_mini_history` table that the new migrator ignores. Once the new migrator has run successfully (check `SELECT * FROM wflow.sql_migrations`) you can drop the legacy table by hand: `DROP TABLE wflow.flyway_temporal_mini_history;`.
 
 ### Concurrency
 
-The scheduler tracks in-flight workflow ids in a `ConcurrentHashMap` (`WorkflowRuntimeRegistry`) so the same workflow is never queued twice across overlapping polls. Each entry carries a status: `SUBMITTED` is set when the scheduler calls `executor.execute(...)` (and is enough to block re-submission), and is flipped to `RUNNING` from inside the worker right before `engine.run(id)` — so the "RUNNING" view reflects what is actually executing, not what is still buffered in the executor's task queue. Within a single workflow, activities are sequential — there is no parallelism inside `run()`.
+**Within a single instance** — the scheduler tracks in-flight workflow ids in a `ConcurrentHashMap` (`WorkflowRuntimeRegistry`) so the same workflow is never queued twice across overlapping polls. Each entry carries a status: `SUBMITTED` is set when the scheduler calls `executor.execute(...)` (and is enough to block re-submission), and is flipped to `RUNNING` from inside the worker right before `engine.run(id)` — so the "RUNNING" view reflects what is actually executing, not what is still buffered in the executor's task queue. Within a single workflow, activities are sequential — there is no parallelism inside `run()`.
 
-If you run multiple application instances against the same database, all of them will poll. The current implementation does **not** have row-level locking, so a workflow could in theory be picked up by two instances at once. For multi-instance deployments, either run a single scheduler (`workflow.scheduler.enabled=false` on the others) or wrap the polling query in a `SELECT ... FOR UPDATE SKIP LOCKED` (extension point, not provided out of the box).
+**Across multiple instances** — all instances poll independently. The duplicate-execution guard is a database row lock: `WorkflowExecutor.tryExecute()` runs inside a single `@Transactional` that begins with `SELECT … FOR UPDATE SKIP LOCKED WHERE id = :id`. The instance that wins the lock proceeds to call `engine.run(id)`; any other instance that tries the same id at the same moment receives 0 rows back from the locked query and returns immediately. The lock is held for the entire duration of the run and is released atomically when the transaction commits (after `workflowRepository.save(entity)`). See [Multi-instance deployment](#multi-instance-deployment) for the full setup.
 
 ### Observability
 

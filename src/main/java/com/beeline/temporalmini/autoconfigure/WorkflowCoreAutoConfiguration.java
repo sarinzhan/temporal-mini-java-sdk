@@ -3,15 +3,19 @@ package com.beeline.temporalmini.autoconfigure;
 import com.beeline.temporalmini.metrics.ActivityMetrics;
 import com.beeline.temporalmini.metrics.WorkflowMetrics;
 import com.beeline.temporalmini.*;
+import com.beeline.temporalmini.ui.NodeStateController;
+import com.beeline.temporalmini.ui.UiAggregatorController;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.web.client.RestClient;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
@@ -43,6 +47,13 @@ public class WorkflowCoreAutoConfiguration {
         return new WorkflowRuntimeRegistry();
     }
 
+    @Bean
+    @ConditionalOnMissingBean(WorkflowExecutor.class)
+    public WorkflowExecutor workflowTaskExecutor(WorkflowRepository workflowRepository,
+                                                  WorkflowEngine engine) {
+        return new WorkflowExecutor(workflowRepository, engine);
+    }
+
     /**
      * Bounded executor for running workflows in parallel.
      * Defaults: poolSize = CPU count, queueCapacity = 100, AbortPolicy.
@@ -70,10 +81,39 @@ public class WorkflowCoreAutoConfiguration {
 
     @Bean
     @ConditionalOnProperty(name = "workflow.scheduler.enabled", havingValue = "true", matchIfMissing = true)
-    public WorkflowScheduler workflowScheduler(WorkflowEngine engine,
-                                               WorkflowRepository workflowRepository,
+    public WorkflowScheduler workflowScheduler(WorkflowRepository workflowRepository,
                                                @Qualifier(EXECUTOR_BEAN) ThreadPoolTaskExecutor executor,
-                                               WorkflowRuntimeRegistry runtimeRegistry) {
-        return new WorkflowScheduler(engine, workflowRepository, executor, runtimeRegistry);
+                                               WorkflowRuntimeRegistry runtimeRegistry,
+                                               WorkflowExecutor workflowTaskExecutor) {
+        return new WorkflowScheduler(workflowRepository, executor, runtimeRegistry, workflowTaskExecutor);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "workflow.instance.url")
+    public InstanceRegistryService instanceRegistryService(
+            InstanceRegistryRepository instanceRegistryRepository,
+            @Value("${workflow.instance.url}") String instanceUrl) {
+        return new InstanceRegistryService(instanceRegistryRepository, instanceUrl);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(RestClient.class)
+    public RestClient workflowRestClient() {
+        return RestClient.create();
+    }
+
+    @Bean
+    @ConditionalOnBean(InstanceRegistryService.class)
+    public NodeStateController nodeStateController(InstanceRegistryService instanceRegistryService,
+                                                    WorkflowRuntimeRegistry runtimeRegistry,
+                                                    @Qualifier(EXECUTOR_BEAN) ThreadPoolTaskExecutor executor) {
+        return new NodeStateController(instanceRegistryService, runtimeRegistry, executor);
+    }
+
+    @Bean
+    @ConditionalOnBean(InstanceRegistryService.class)
+    public UiAggregatorController uiAggregatorController(InstanceRegistryRepository instanceRegistryRepository,
+                                                          RestClient workflowRestClient) {
+        return new UiAggregatorController(instanceRegistryRepository, workflowRestClient);
     }
 }

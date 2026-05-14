@@ -9,6 +9,7 @@ import org.springframework.data.repository.query.Param;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 public interface WorkflowRepository extends JpaRepository<WorkflowEntity, Long> {
 
@@ -78,4 +79,8 @@ public interface WorkflowRepository extends JpaRepository<WorkflowEntity, Long> 
     List<Long> findIdsByCreatedAtRange(@Param("from") LocalDateTime from,
                                        @Param("to")   LocalDateTime to,
                                        @Param("states") Collection<WorkflowState> states);
+
+    @Query(value = "SELECT * FROM wflow.workflow WHERE id = :id FOR UPDATE SKIP LOCKED",
+           nativeQuery = true)
+    Optional<WorkflowEntity> findByIdForUpdateSkipLocked(@Param("id") Long id);
 }

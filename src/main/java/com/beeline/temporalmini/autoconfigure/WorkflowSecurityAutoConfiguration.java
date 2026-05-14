@@ -78,7 +78,7 @@ public class WorkflowSecurityAutoConfiguration {
     public SecurityFilterChain workflowSecurityFilterChain(HttpSecurity http,
                                                             SecurityContextRepository repo) throws Exception {
         http
-                .securityMatcher("/temporal-mini/**")
+                .securityMatcher("/temporal-mini/**", "/internal/**", "/ui/**")
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/temporal-mini/api/auth/login").permitAll()
                         .anyRequest().authenticated())
