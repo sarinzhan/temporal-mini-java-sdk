@@ -1,13 +1,15 @@
-# temporal-mini
+# beeline-workflow
 
-A lightweight, persistent workflow engine for Spring Boot — Temporal-style replayable activities, **two database tables**, no extra infrastructure required.
+Lightweight durable workflow engine for Spring Boot, backed by PostgreSQL. No external infrastructure — no Temporal cluster, no Conductor, no message broker. Just your Spring app and the database you already have.
 
-`temporal-mini` is intended for teams that need durable, retry-aware background workflows but don't want to operate a full Temporal cluster. You write a `Workflow`, call `activity(...)` for each step, and the framework guarantees:
+You write workflows as plain Java methods, call activities (either through typed interfaces or via a functional API), and the engine guarantees:
 
-- each successful activity runs **at most once** per workflow (replay-safe);
-- failed activities are **retried** according to a `RetryPolicy` (fixed / exponential / no-retry);
-- workflows survive process restarts (state is in your relational DB);
-- a built-in **scheduler** picks up pending work; a built-in **web UI** lets you observe and control workflows.
+- each successful activity runs **at most once** per workflow (replay-safe cache by `(workflow_id, activity_name)`);
+- failed activities are **retried** according to a configurable `RetryPolicy` (exponential backoff, non-retryable classes);
+- per-activity **timeout** through `CompletableFuture`;
+- workflows **survive process restarts** — state lives in Postgres;
+- **multi-instance**: any number of replicas pull from the same task queue using `SELECT … FOR UPDATE SKIP LOCKED`;
+- **JDK Proxy only** — no CGLIB, no bytecode rewriting.
 
 ---
 
@@ -16,15 +18,14 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [Writing a workflow](#writing-a-workflow)
+- [Two styles of activities](#two-styles-of-activities)
 - [Retry policies](#retry-policies)
-- [Lifecycle & states](#lifecycle--states)
-- [REST API](#rest-api)
-- [Web UI](#web-ui)
-- [Authentication](#authentication)
-- [Configuration reference](#configuration-reference)
+- [Workflow lifecycle & states](#workflow-lifecycle--states)
+- [Signals](#signals)
 - [Multi-instance deployment](#multi-instance-deployment)
-- [Building the UI](#building-the-ui)
-- [Operations](#operations)
+- [Cluster REST API](#cluster-rest-api)
+- [Configuration reference](#configuration-reference)
+- [Database schema](#database-schema)
 - [FAQ](#faq)
 
 ---
@@ -32,58 +33,70 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          your Spring Boot app                            │
-│                                                                          │
-│   @Component class MyWorkflow implements Workflow { ... }                │
-│                              │                                           │
-│                              ▼                                           │
-│                       WorkflowEngine ──────────► Workflow.run(ctx)       │
-│                              ▲                                           │
-│                              │ submit(id)                                │
-│                       WorkflowScheduler                                  │
-│                              │ poll every Nms                            │
-│                              ▼                                           │
-│   ┌──────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
-│   │ workflowExec │    │  WorkflowRepo   │    │  ActivityRepo   │         │
-│   │ (thread pool)│    └────────┬────────┘    └────────┬────────┘         │
-│   └──────────────┘             │                      │                  │
-└────────────────────────────────┼──────────────────────┼──────────────────┘
-                                 ▼                      ▼
-                   ┌────────────────────┐    ┌────────────────────┐
-                   │    wflow.workflow  │    │    wflow.activity  │
-                   └────────────────────┘    └────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                          your Spring Boot app                          │
+│                                                                        │
+│   @WorkflowComponent class OrderWorkflow { ... }                       │
+│   @Activity         interface PaymentActivity { ... }                  │
+│   @Service          class PaymentActivityImpl implements ... { ... }   │
+│                                                                        │
+│                              │                                         │
+│                              ▼                                         │
+│    WorkflowClient ──► workflows + tasks (one tx, INSERT both)          │
+│                                                                        │
+│    WorkerLoop @Scheduled ──► SELECT FOR UPDATE SKIP LOCKED             │
+│         │                                                              │
+│         ├─► claim batch (PROCESSING, locked_by, locked_at)             │
+│         ├─► thread pool (worker-pool-size)                             │
+│         │     │                                                        │
+│         │     ▼                                                        │
+│         │   WorkflowExecutor                                           │
+│         │     ├─► find @WorkflowComponent bean by type                 │
+│         │     ├─► set WorkflowContextHolder (ThreadLocal)              │
+│         │     ├─► invoke entry method                                  │
+│         │     │     │                                                  │
+│         │     │     ▼                                                  │
+│         │     │   activity stub (JDK Proxy) OR Workflow.activity(...)  │
+│         │     │     │                                                  │
+│         │     │     ▼                                                  │
+│         │     │   ActivityExecutor                                     │
+│         │     │     ├─ SELECT activity_results — if COMPLETED, return  │
+│         │     │     │     cached + skip execution                      │
+│         │     │     ├─ CompletableFuture.get(startToCloseTimeout)      │
+│         │     │     ├─ success: UPSERT activity_results,               │
+│         │     │     │           INSERT events(ACTIVITY_COMPLETED)      │
+│         │     │     └─ failure: → RetryPolicy →                        │
+│         │     │           INSERT retries(fire_at=now+backoff)          │
+│         │     │           OR mark DEAD                                 │
+│         │     └─ finalize: workflow status, event log                  │
+│         └─► task → DONE / DEAD                                         │
+│                                                                        │
+│    RetryScheduler @Scheduled ──► retries where fire_at<=now →          │
+│                                  INSERT tasks(PENDING)                 │
+│                                                                        │
+│    TimeoutWatcher @Scheduled ──► reset stale PROCESSING tasks          │
+│                                                                        │
+│    InstanceRegistryService @Scheduled(10s) ──► UPSERT instance_registry│
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+                          ┌────────────────┐
+                          │   PostgreSQL   │
+                          │                │
+                          │  workflows     │
+                          │  tasks         │
+                          │  activity_*    │
+                          │  retries       │
+                          │  events        │
+                          │  signals       │
+                          │  instance_*    │
+                          └────────────────┘
 ```
 
-**Components**
+**Key idea — replay cache.** When an activity is called, the engine first checks `activity_results` for a row matching `(workflow_id, activity_name)`. If `status = 'COMPLETED'`, the cached JSON is deserialized and returned without invoking the activity body. So even when the workflow is re-entered (for example, after a worker crash mid-flight), already-successful steps are skipped.
 
-| Component | Role |
-|---|---|
-| `Workflow` | Interface you implement. `type()` is the registry key, `run(ctx)` is the body. |
-| `WorkflowContext` | Passed to your workflow. Use `ctx.activity(name, retryPolicy, fn)` to run a step. |
-| `WorkflowEngine` | Starts, runs, stops/resumes/restarts workflows (single + bulk). Resolves `Workflow` beans into a registry. |
-| `TemporalMiniSchemaMigrator` | Tiny forward-only SQL migrator. Reads `db/migration/temporal-mini/V*__*.sql` from the classpath and tracks applied versions in `wflow.sql_migrations`. Replaces Flyway. |
-| `MetricsSampler` | `@Scheduled` snapshot writer for the metrics chart — appends a row to `wflow.metric_sample` every 10s and trims older rows on a daily cron. |
-| `WorkflowScheduler` | `@Scheduled` poller that picks up `NEW` and `RETRY` (when `nextRetryAt <= now`) workflows. Before polling, checks `executor.getQueue().remainingCapacity()` — if the pool's internal queue is full, the poll is skipped entirely. Submits ready ids to the thread pool. |
-| `WorkflowExecutor` | Wraps `engine.run()` in a `@Transactional` that starts with `SELECT … FOR UPDATE SKIP LOCKED` — so only one instance across a cluster can hold the row lock and execute a given workflow at a time. The lock is held for the full duration of the run and released on commit. |
-| `workflowExecutor` | Bounded `ThreadPoolTaskExecutor`. Runs workflows in parallel. |
-| `WorkflowRuntimeRegistry` | In-memory tracker for ids the scheduler has handed to the executor. Distinguishes `SUBMITTED` (in the executor's queue) from `RUNNING` (worker thread actually executing); the latter powers the UI's `RUNNING` state and the `runtimeCount` metric. Also acts as a deduplication guard across overlapping polls **on the same instance**. |
-| `InstanceRegistryService` | Registers this instance in `wflow.instance_registry` on startup (`@PostConstruct`), deregisters on shutdown (`@PreDestroy`), and refreshes `last_heartbeat` every 10 s. Activated only when `workflow.instance.url` is set. |
-| `WorkflowRepository` / `ActivityRepository` | Spring Data JPA repos for the live tables: `wflow.workflow`, `wflow.activity`. |
-| `WorkflowHistoryRepository` / `ActivityHistoryRepository` | Spring Data JPA repos for the append-only audit tables: `wflow.workflow_history` (one row per `engine.run()` pickup), `wflow.activity_history` (mirror of every activity attempt). See [Database schema](#database-schema). |
-| `ActivityMetrics` / `WorkflowMetrics` | Optional Micrometer instrumentation. Auto-registered when a `MeterRegistry` is present on the classpath. |
-| `WorkflowUiController` | REST API at `/temporal-mini/api/**`: workflows, stats, pool, control actions. |
-| `NodeStateController` | `GET /internal/state` — returns this instance's live state: node id, URL, executor queue depth, active thread count, running workflow ids. |
-| `UiAggregatorController` | `GET /ui/state` — reads all live instances from `wflow.instance_registry` (`last_heartbeat > now − 30 s`) and fans out a `GET /internal/state` call to each via `RestClient`. Returns an aggregated view. Any instance in the cluster can serve as the aggregator. |
-| `AuthController` (optional) | JSON login/logout/me at `/temporal-mini/api/auth/**` — wired only when auth is enabled. |
-| `SpaController` | Redirects `/temporal-mini` → `/temporal-mini/ui/` and serves the SPA's `index.html` for deep links. |
-| React SPA | Dashboard at `/temporal-mini/ui/` (Vite + TypeScript + TanStack Query/Table + Material UI + React Router). |
-
-**Replay model** — at the start of every run, the engine re-executes `Workflow.run()` from scratch. Each `ctx.activity(name, ...)` call first checks `wflow.activity` for the row matching this workflow + name; if `success = true`, it returns the cached output without invoking your function. Otherwise the engine runs the function and **upserts** the row (the same `(workflow_id, name)` row is updated in place across retries, so the live table stays slim — one row per activity per workflow). Failed and successful attempts alike are also appended to `wflow.activity_history` for the full audit trail.
-
-> The replay-cache only reads `wflow.activity` (the live table). The `*_history` tables are written in parallel but never consulted by the engine — they exist purely as an immutable audit trail for the UI / operators.
-
-> **Activity names must be unique within a workflow.** Two activities with the same name in the same workflow will collide on replay.
+The runtime class of the result is captured at the first success (`activity_results.result_type`) and used on replay to deserialize back to the right Java type — you don't need to pass a `Class<T>` token.
 
 ---
 
@@ -94,14 +107,15 @@ A lightweight, persistent workflow engine for Spring Boot — Temporal-style rep
 ```xml
 <dependency>
     <groupId>com.beeline</groupId>
-    <artifactId>temporal-mini</artifactId>
-    <version>0.0.1</version>
+    <artifactId>workflow</artifactId>
+    <version>0.1.0</version>
 </dependency>
 ```
 
 You also need:
-- `spring-boot-starter-web` (for the UI/API),
-- `spring-boot-starter-data-jpa` + a JDBC driver (PostgreSQL is what the bundled migrations target).
+- `spring-boot-starter-data-jpa` (compile-time dep)
+- a JDBC driver (PostgreSQL is what the bundled migrations target)
+- `spring-boot-starter-web` if you want the cluster REST endpoints
 
 ### 2. Configure your DataSource
 
@@ -111,301 +125,372 @@ spring.datasource.username=app
 spring.datasource.password=secret
 ```
 
-`temporal-mini` ships its own SQL migrator (no Flyway dependency). On startup it reads
-`db/migration/temporal-mini/V*__*.sql` from the classpath, applies any version it
-hasn't seen before, and tracks applied versions in `wflow.sql_migrations`. Your
-application's own migrations (Flyway, Liquibase, anything else) are untouched.
+Flyway runs `db/migration/V1__*.sql` … `V9__*.sql` from inside the jar on first startup.
 
-### 3. Write a workflow
+### 3. Write an activity
 
 ```java
-@Component
-public class SendInvoiceWorkflow implements Workflow {
-
-    private final BillingClient billing;
-    private final EmailClient email;
-
-    public SendInvoiceWorkflow(BillingClient billing, EmailClient email) {
-        this.billing = billing;
-        this.email = email;
-    }
-
-    @Override
-    public String type() { return "send-invoice"; }
-
-    @Override
-    public void run(WorkflowContext ctx) {
-        Invoice invoice = ctx.activity("fetch-invoice",
-                RetryPolicy.exponential(5, 1_000),
-                () -> billing.fetch(/* ... */));
-
-        ctx.activity("email-customer", invoice,
-                RetryPolicy.fixed(3, 30_000),
-                inv -> { email.send(inv); return null; });
-    }
+// Interface — must be annotated with @Activity
+@Activity
+public interface PaymentActivity {
+    PaymentResult charge(String orderId, BigDecimal amount);
+    void refund(String orderId);
 }
+
+// Implementation — plain Spring bean
+@Service
+public class PaymentActivityImpl implements PaymentActivity {
+    public PaymentResult charge(String orderId, BigDecimal amount) {
+        // your real payment-gateway call
+        return new PaymentResult("tx-" + orderId, "OK");
+    }
+    public void refund(String orderId) { /* ... */ }
+}
+
+public record PaymentResult(String transactionId, String status) {}
 ```
 
-### 4. Start a workflow
+### 4. Write a workflow
+
+```java
+@WorkflowComponent              // value() not set → type = "OrderWorkflow"
+public class OrderWorkflow {
+
+    private final PaymentActivity payment = Workflow.newActivityStub(
+            PaymentActivity.class,
+            ActivityOptions.newBuilder()
+                    .setStartToCloseTimeout(Duration.ofSeconds(30))
+                    .setRetryPolicy(RetryPolicy.newBuilder()
+                            .setMaxAttempts(3)
+                            .setInitialInterval(Duration.ofSeconds(1))
+                            .setBackoffCoefficient(2.0)
+                            .addNoRetry(IllegalArgumentException.class)
+                            .build())
+                    .build()
+    );
+
+    // single-param entry method — input is deserialized from JSON
+    public String processOrder(OrderInput input) {
+        PaymentResult result = payment.charge(input.orderId(), input.amount());
+        return result.transactionId();
+    }
+}
+
+public record OrderInput(String orderId, BigDecimal amount) {}
+```
+
+### 5. Start a workflow
 
 ```java
 @RestController
-public class InvoicesController {
-    private final WorkflowEngine engine;
-    InvoicesController(WorkflowEngine engine) { this.engine = engine; }
+public class OrderController {
 
-    @PostMapping("/invoices/{id}/send")
-    public Map<String, Long> send(@PathVariable Long id) {
-        Long workflowId = engine.start("send-invoice", String.valueOf(id));
+    private final WorkflowClient workflowClient;
+
+    public OrderController(WorkflowClient workflowClient) {
+        this.workflowClient = workflowClient;
+    }
+
+    @PostMapping("/orders")
+    public Map<String, UUID> startOrder(@RequestBody OrderInput input) {
+        UUID workflowId = workflowClient.startWorkflow("OrderWorkflow", input);
         return Map.of("workflowId", workflowId);
     }
 }
 ```
 
-### 5. Open the UI
-
-Visit **`http://localhost:8080/temporal-mini/ui/`** (or just `http://localhost:8080/temporal-mini`, which redirects). The SPA bundle is built from `frontend/` into the jar's classpath resources during `mvn package` — see [Building the UI](#building-the-ui).
-
 ---
 
 ## Writing a workflow
 
-A workflow is a deterministic sequence of `activity(...)` calls. The engine guarantees that:
+A workflow class is a regular Spring bean annotated with `@WorkflowComponent`. It must expose a single entry method:
 
-1. Activities that have already succeeded for this workflow are **skipped on replay** (the cached result is returned).
-2. Activities that fail are **retried** according to their `RetryPolicy`. Between retries, the workflow record's `nextRetryAt` is set to a future timestamp; the scheduler picks it up later.
-3. When all activities have succeeded, the workflow transitions to `FINISHED`.
-4. When an activity exhausts its retries, the workflow transitions to `FAILED`.
+- public, non-static, non-synthetic, declared on the class itself;
+- if there's exactly **one** such method, it's used automatically;
+- otherwise the engine looks for a method named `run`;
+- the method may take **0 or 1 parameters**. With 1 parameter, the input JSON from `workflows.input` is deserialized into that type.
 
-There are three `activity(...)` overloads:
+**`@WorkflowComponent` is a meta-`@Component`**, so Spring picks the class up via component scan. You can pass a value to override the workflow type:
 
 ```java
-// Run with a typed input. Input is JSON-serialized into wflow.activity.input_payload
-// and the same instance is passed to the function. Output type is captured at runtime
-// (via result.getClass()) and stored alongside the JSON in output_type so replay can
-// deserialize back without you having to pass a Class<O> token.
-<I, O> O activity(String name, I input, RetryPolicy policy, Function<I, O> fn);
-
-// No input. Output handling identical to the above.
-<T> T activity(String name, RetryPolicy policy, Supplier<T> fn);
-
-// Side-effecting only; nothing stored in output_payload/output_type.
-void activity(String name, RetryPolicy policy, Runnable fn);
+@WorkflowComponent("order-flow-v2")
+public class OrderWorkflow { ... }
 ```
 
-> The replay-cache uses {@code output_type} (a fully-qualified class name persisted on first success) to deserialize the cached JSON back to a typed Java object. If the class is later renamed/removed from the classpath, replay throws `IllegalStateException` — the operator should `restart` the workflow.
+Default type when value is omitted is the simple class name.
 
-### Best practices
+### Determinism
 
-- **Make activity names stable.** They are the cache key on replay. Renaming a name re-executes the step.
-- **Make activity bodies side-effect-safe to retry.** Network calls should be idempotent (e.g. include a request-id header) so a retry doesn't double-charge.
-- **Don't put logic outside `activity(...)` calls.** Anything in `run()` outside an `activity` block runs every replay.
-- **Don't share mutable state between activities through your workflow class fields** — use the activity result as the contract.
+Code in a workflow method **between** activity calls runs on every replay (in this lightweight engine, currently a replay = a fresh worker pickup after a retry-eligible failure). Keep that code deterministic and side-effect-free:
+
+- ✅ parsing input, branching, building activity arguments
+- ✅ calling other activities
+- ❌ direct DB writes, HTTP calls, file I/O — wrap those in activities
+- ❌ `Math.random()`, `Instant.now()` in branching logic — feed timestamps in via activity results if you need them deterministic
+
+---
+
+## Two styles of activities
+
+### A. Typed interface stub (recommended)
+
+```java
+private final PaymentActivity payment =
+        Workflow.newActivityStub(PaymentActivity.class, options);
+
+// call as a normal method
+PaymentResult r = payment.charge(orderId, amount);
+```
+
+- Type-safe, IDE-friendly
+- Activity name auto-derived as `InterfaceName.methodName` (e.g. `PaymentActivity.charge`)
+- Implementation must be a `@Service` (or any Spring bean) implementing the `@Activity` interface — auto-wired into `ActivityRegistry`
+- The stub is a JDK Proxy created lazily. **Creating it in a field initializer is safe** — the proxy never accesses any registry at construction time, only when a method is actually invoked inside a workflow execution.
+
+### B. Functional API (familiar to users of the old temporal-mini)
+
+```java
+PaymentResult r = Workflow.activity(
+        "charge",
+        ActivityOptions.newBuilder()
+                .setStartToCloseTimeout(Duration.ofSeconds(30))
+                .setRetryPolicy(RetryPolicy.newBuilder().setMaxAttempts(3).build())
+                .build(),
+        () -> gateway.charge(orderId, amount)
+);
+
+// With explicit input — useful when you want input audit in events later
+String ack = Workflow.activity("confirm", r, x -> notifier.send(x.transactionId()));
+
+// Side-effect only (Runnable)
+Workflow.activity("audit", () -> auditLog.record(orderId));
+
+// Short forms use ActivityOptions.defaultOptions()
+String s = Workflow.activity("simple", () -> svc.doSomething());
+```
+
+- No interface required — call any Spring bean (or lambda) directly
+- Activity name is **whatever string you pass** — uniqueness within a workflow is **your responsibility**
+- Return type is captured at runtime via `result.getClass()`. On replay the engine uses `activity_results.result_type` to deserialize back without a `Class<T>` token
+
+Both styles can be mixed in the same workflow. They share the same cache, retry, timeout, and event semantics — they both delegate to `ActivityExecutor`.
+
+> **Activity names must be unique within a workflow.** Two calls with the same name (and same workflow) collide on the cache key.
 
 ---
 
 ## Retry policies
 
 ```java
-RetryPolicy.noRetry();                            // 1 attempt, fail-fast
-RetryPolicy.fixed(maxAttempts, intervalMs);       // constant delay between attempts
-RetryPolicy.exponential(maxAttempts, baseMs);     // delay = 2^attempt * base
-RetryPolicy.DEFAULT                               // exponential(3, 1_000)
+RetryPolicy.defaultPolicy();                  // maxAttempts=3, initialInterval=1s, backoff=2.0
+
+RetryPolicy.newBuilder()
+    .setMaxAttempts(5)
+    .setInitialInterval(Duration.ofSeconds(2))
+    .setBackoffCoefficient(2.0)              // delay = initial * (backoff ^ attempt)
+    .addNoRetry(IllegalArgumentException.class)
+    .addNoRetry(SomeBusinessException.class)
+    .build();
 ```
 
-`maxAttempts` is the **total** number of attempts (so `fixed(3, ...)` means up to 3 tries: the initial call plus 2 retries).
+`maxAttempts` is the **total** number of attempts (initial + retries). Setting `1` = fail-fast.
 
-Delays are scheduled by setting `workflowEntity.nextRetryAt` and throwing — the scheduler picks the workflow up again after that time.
+On failure:
+- If the exception is a `NonRetryableException` or matches any `addNoRetry(...)` class → activity is marked `DEAD`, workflow transitions to `FAILED`. No retry.
+- Else if `attempt < maxAttempts` → row inserted into `retries(fire_at = now + initialInterval × backoff^attempt)`. `RetryScheduler` will pick it up later and create a fresh `tasks` row.
+- Else (attempts exhausted) → activity `DEAD`, workflow `FAILED`.
 
 ---
 
-## Lifecycle & states
-
-The persisted state machine has **four** states. There is intentionally no "currently running" state in the database — in-flight execution is tracked in memory by `WorkflowRuntimeRegistry`. Persisting it would create restart races (a JVM crash mid-execution would leave a stale row that no longer corresponds to anything).
-
-> **`STOPPED` vs. legacy `BLOCKED`.** The user-facing name (Java enum, REST API, UI) is `STOPPED`. The database column still stores the literal string `"BLOCKED"` so existing data needs no migration — see `WorkflowStateConverter`.
-
-> **Legacy `RUNNABLE` rows.** If you're upgrading from a previous version that used `RUNNABLE`, `WorkflowStateConverter` maps the string `"RUNNABLE"` on read to the new `RETRY` state. No data migration needed.
+## Workflow lifecycle & states
 
 ```
-            start()
-   (none) ─────────►  NEW  ───────────────────────────────────────┐
-                                                                   │
-                                         engine picks up          │
-                       NEW / RETRY ◄──────────────────────────────┘
-                              │
-                              │  run()
-                              ▼
-                         (executing)
-                              │
-                  ┌───────────┼───────────┐
-                  │           │           │
-                  ▼           ▼           ▼
-               FINISHED     FAILED      RETRY
-                                     (nextRetryAt set)
-                                          │
-                                          ├── nextRetryAt in future → WAITING
-                                          └── nextRetryAt <= now    → IN QUEUE
-
-   stop()         → NEW / RETRY → STOPPED
-   resume()       → STOPPED / FAILED → RETRY (queued immediately)
-   restart()      → wipe activities, reset to RETRY (any state)
-   restartFromActivity() → wipe activities ≥ pivot, reset to RETRY
+              startWorkflow()
+       ┌────────────────────┐
+       ▼                    │
+   PENDING ──── worker picks up ────┐
+                                    ▼
+                                 RUNNING ────────┐
+                                    │            │
+                                    │ success    │ unexpected exception /
+                                    ▼            ▼ non-retryable / attempts exhausted
+                                COMPLETED      FAILED
 ```
 
-| State | Persisted? | Picked by scheduler? | Meaning |
-|---|---|---|---|
-| `NEW` | yes | yes | created, never run |
-| `RETRY` | yes | yes (when `nextRetryAt <= now`) | a previous attempt failed; waiting for the next run window |
-| `STOPPED` | yes (as `"BLOCKED"`) | **no** | manually paused — won't be picked up |
-| `FINISHED` | yes | no | completed successfully (terminal) |
-| `FAILED` | yes | no | exhausted retries (terminal) |
+| State | Persisted | Meaning |
+|---|---|---|
+| `PENDING` | yes | created, in queue, never executed (transient, usually <2s) |
+| `RUNNING` | yes | currently executing on some node, **or** sitting between retry attempts (the in-flight detail is in `retries.fire_at`) |
+| `COMPLETED` | yes | terminal — workflow returned normally |
+| `FAILED` | yes | terminal — non-retryable error or retries exhausted |
 
-The UI shows three additional **derived** views, computed server-side:
+There is **no separate "RETRYING" state** in the database. Between attempts, the workflow stays in `RUNNING` and the `retries` row carries the schedule. UI can derive "waiting for retry" from `tasks` having no `PROCESSING` row + an open `retries` row.
 
-| UI label | Wire state | Source | Meaning |
-|---|---|---|---|
-| **Ready to run** | `IN_QUEUE` | DB | `NEW` + `RETRY` rows where `nextRetryAt <= now` — ready to be picked up on the next poll |
-| **Waiting retry** | `WAITING` | DB | `RETRY` rows where `nextRetryAt > now` — sleeping until their retry window opens |
-| **Running** | `RUNNING` | `WorkflowRuntimeRegistry` | ids the executor has actually started running on a worker thread (excludes those still sitting in the executor queue) |
+**Currently-executing right now (per node):**
 
-**Manual controls** (also exposed in the UI):
+```sql
+SELECT t.workflow_id, t.locked_by AS node_id, t.locked_at, t.locked_until
+FROM tasks t
+WHERE t.status = 'PROCESSING' AND t.locked_until > now();
+```
 
-- `engine.runNow(id)` — sets `nextRetryAt = now`. If the workflow is `FAILED` or `STOPPED`, also flips it to `RETRY`. Forbidden on `FINISHED`.
-- `engine.stop(id)` — `NEW` or `RETRY` → `STOPPED`. Forbidden on terminal states.
-- `engine.resume(id)` — `STOPPED` or `FAILED` → `RETRY` and queues for immediate pickup.
-- `engine.restart(id)` — wipes every activity row for this workflow and resets state to `RETRY`. Allowed in any state. **Destructive** for the live replay cache, but `wflow.activity_history` rows are preserved (with their `activity_id` set to `NULL` by the FK).
-- `engine.restartFromActivity(id, activityId)` — deletes activity rows whose `startedAt >= chosen.startedAt` (the pivot and everything after it), resets state to `RETRY`. Earlier successful activities stay cached. History rows for deleted activities are preserved in `wflow.activity_history`.
-- Bulk variants — `stopAll`, `resumeAll`, `restartAll`, `runNowAll` — accept a `Collection<Long>` and return the number of workflows successfully transitioned. Illegal transitions are skipped silently.
-- Payload editing — `engine.setPayload(id, ...)` (allowed in `NEW`/`RETRY`/`STOPPED`/`FAILED`); `engine.setActivityPayload(id, activityId, payload, output)` for an activity's input or output (no state check — operator's responsibility).
+Each instance writes its `instance.id` to `tasks.locked_by` when claiming work. This is the source of truth for "what's running where" across the cluster.
 
 ---
 
-## REST API
+## Signals
 
-All endpoints are mounted under `/temporal-mini/api`:
+External code can send named signals to a running workflow; workflows can block waiting for them.
+
+```java
+// Inside a workflow
+Object payload = Workflow.waitForSignal("approval", Duration.ofMinutes(10));
+if (payload == null) {
+    throw new NonRetryableException("Approval timeout");
+}
+
+// From elsewhere (e.g. a REST controller)
+@Autowired SignalBus signalBus;
+signalBus.send(workflowId, "approval", Map.of("by", "manager-42"));
+```
+
+Signals are persisted in the `signals` table. Delivery is at-least-once-then-consumed: `await` claims the first unconsumed row via `FOR UPDATE SKIP LOCKED` and marks it `consumed = true`.
+
+> **Note:** the current `await` implementation polls every 500 ms while a worker thread is blocked. For long waits (hours, days), this is fine — Postgres load is negligible — but it does keep a worker slot occupied. Consider sizing `worker-pool-size` accordingly if many workflows wait simultaneously.
+
+---
+
+## Multi-instance deployment
+
+Run any number of replicas against the same Postgres. They share the same task queue. Duplicate execution is prevented at the database level via `SELECT … FOR UPDATE SKIP LOCKED`.
+
+### How it works
+
+```
+┌────────────┐   poll every Nms      ┌─────────────────────────────────┐
+│ Instance 1│ ────────────────────► │            tasks                │
+│            │   FOR UPDATE SKIP    │  id  status  locked_by ...      │
+│            │   LOCKED LIMIT N     └─────────────────────────────────┘
+└────────────┘                                ▲
+                                              │ locked_by = node-2
+┌────────────┐   poll every Nms              │ (other instance won this row)
+│ Instance 2│ ──────────────────────────────┘
+└────────────┘
+```
+
+Each worker loop does this in one transaction:
+
+1. `SELECT * FROM tasks WHERE status='PENDING' AND scheduled_at<=now() ORDER BY scheduled_at LIMIT N FOR UPDATE SKIP LOCKED`
+2. For each returned row: set `status='PROCESSING'`, `locked_by=<this instance id>`, `locked_at=now()`, `locked_until=now()+lockTimeout`
+3. Commit
+
+Rows locked by another instance's transaction are silently skipped (that's what `SKIP LOCKED` does). After commit, the worker hands the task to its thread pool and processes it without holding the row lock.
+
+If a worker dies mid-processing, the row stays in `PROCESSING` with a stale `locked_until`. The `TimeoutWatcher` (`@Scheduled`, default 5 s) resets such rows back to `PENDING` so any node can pick them up again.
+
+### Setup
+
+In each replica's config:
+
+```properties
+workflow.instance.id=node-1
+workflow.instance.internal-url=http://app1:8080
+workflow.instance.external-url=https://api.example.com/node-1
+```
+
+- `id` must be unique per replica. PK in `instance_registry`, value of `tasks.locked_by`.
+- `internal-url` — address other nodes can reach this one in the private network (e.g. docker service name, k8s service). Currently informational; stored in the registry and exposed to the UI for topology display.
+- `external-url` — public address the browser-side UI calls. **Required to enable multi-instance mode.**
+
+Validation on startup (fail-fast):
+- `external-url` set + `id == "default"` → exception
+- `external-url` set + `internal-url` missing → exception
+
+If `external-url` is empty (default), the node runs in **single-instance mode**: no registry rows, no heartbeats, and `/workflow/api/cluster/nodes` returns `{ "nodes": [] }`.
+
+### Heartbeat
+
+When multi-instance is enabled:
+
+- `@PostConstruct`: UPSERT into `instance_registry` (id, internal_url, external_url, last_heartbeat=now)
+- `@Scheduled(fixedDelay=10s)`: UPDATE `last_heartbeat=now()`
+- `@PreDestroy`: DELETE the row
+- A node is considered live when `last_heartbeat > now() - 30s`
+
+### Browser-side fan-out (no server-side aggregator)
+
+The engine does **not** fan out HTTP between nodes to build a global cluster view. Instead, the UI gets the list of nodes from any single instance and queries each node's `external-url` directly.
+
+```
+Browser → GET https://nodeA/workflow/api/cluster/nodes
+        ← { self: "node-A", nodes:[
+              {id:"node-A", externalUrl:"https://nodeA/..."},
+              {id:"node-B", externalUrl:"https://nodeB/..."},
+              {id:"node-C", externalUrl:"https://nodeC/..."} ]}
+
+Browser → GET https://nodeA/workflow/api/cluster/local
+Browser → GET https://nodeB/workflow/api/cluster/local
+Browser → GET https://nodeC/workflow/api/cluster/local
+        ← per-node { pool, running:[ ... ] }
+```
+
+This avoids node-to-node HTTP, timeouts, and one-bad-node-poisons-everyone. If a node is unreachable from the browser, the UI marks it offline; the list of nodes itself still comes from the registry.
+
+`/workflow/api/cluster/*` endpoints are annotated `@CrossOrigin(origins = "*")` to allow the UI loaded from one node to fetch state from peers.
+
+---
+
+## Cluster REST API
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/stats` | Counts per logical state: `NEW`, `IN_QUEUE`, `WAITING`, `RUNNING`, `STOPPED`, `FINISHED`, `FAILED`. `IN_QUEUE` and `WAITING` are derived from `RETRY` rows split by `nextRetryAt`; `RUNNING` is the size of the in-memory runtime registry (workers currently executing). |
-| `GET` | `/pool` | Live snapshot of the workflow executor: `{active, free, poolSize, corePoolSize, maxPoolSize, queue, queueCapacity}`. |
-| `GET` | `/metrics/history?from=&to=&bucket=` | Time-series of pool/state/runtime counters. `bucket` ∈ `raw / second / minute / hour / day` — wide windows aggregate via Postgres `date_trunc`. |
-| `GET` | `/workflows?state=&page=&size=&sort=` | Paged list. `state` repeats for multi-select: `?state=NEW&state=RETRY`. Accepts virtual values `IN_QUEUE` / `WAITING` / `RUNNING` (single-state filters only — the UI never mixes them with others). `sort=field,dir` where field ∈ `id / createdAt / state` and dir ∈ `asc / desc`; default `id,desc`. |
-| `GET` | `/workflows/{id}` | Single workflow record. |
-| `GET` | `/workflows/{id}/activities` | All activity attempts for a workflow, ordered by `startedAt`. |
-| `GET` | `/last-activities?ids=1,2,3` | Latest activity per workflow id: `{name, attempt, lastAttemptAt}`. Used by the dashboard. |
-| `POST` | `/workflows/{id}/run-now` | Force-run on next poll. |
-| `POST` | `/workflows/{id}/stop` | `NEW`/`RETRY` → `STOPPED`. |
-| `POST` | `/workflows/{id}/resume` | `STOPPED`/`FAILED` → `RETRY`, queue for immediate pickup. |
-| `POST` | `/workflows/{id}/restart` | Wipe all activities and reset to `RETRY`. Destructive. |
-| `POST` | `/workflows/{id}/restart-from-activity` | Body `{activityId}`. Wipe activities at/after the pivot, reset to `RETRY`. |
-| `POST` | `/workflows/bulk/{stop,resume,restart,run-now}` | Body either `{ids: [...]}` or `{from, to, states?: []}`. Returns `{affected: N}`. |
-| `PUT`  | `/workflows/{id}/payload` | Body `{payload}`. Replace the workflow input. Allowed in `NEW`/`RETRY`/`STOPPED`/`FAILED`. |
-| `PUT`  | `/workflows/{id}/activities/{activityId}/input` | Body `{payload}`. Edit a stored activity input. |
-| `PUT`  | `/workflows/{id}/activities/{activityId}/output` | Body `{payload}`. Edit a stored activity output (use with care — this is the cached "successful" result). |
-| `POST` | `/auth/login` | JSON `{username, password}` — sets a session cookie. Only present when [auth](#authentication) is enabled. |
-| `POST` | `/auth/logout` | Invalidates the session. |
-| `GET` | `/auth/me` | Returns `{username}` for the current session, `401` if not authenticated, `404` if auth is disabled. |
+| `GET` | `/workflow/api/cluster/nodes` | List of live nodes from `instance_registry` (`last_heartbeat > now − 30 s`). Always present; returns empty list in single-instance mode. |
+| `GET` | `/workflow/api/cluster/local` | This node's pool snapshot (active / queue / max) and its currently-running tasks (`SELECT * FROM tasks WHERE locked_by=<self> AND status='PROCESSING'`). |
 
-Control endpoints return `200 {"status":"ok"}` on success and `400 {"error": "..."}` on illegal state transitions. Bulk endpoints always return `200 {"affected": N}` — workflows whose state forbids the action are silently skipped.
+### Sample responses
 
----
-
-## Web UI
-
-Mounted at **`/temporal-mini/ui/`** (set `temporal-mini.ui.enabled=false` to disable). `/temporal-mini` and `/temporal-mini/` redirect there for old bookmarks.
-
-The dashboard is a React SPA (`frontend/`) — Vite + TypeScript (strict) + TanStack Query for server state and polling, TanStack Table for the workflow list, `@mui/x-charts` for the metrics page, Material UI for components, React Router for `/login`, `/workflows`, `/workflows/:id`, `/metrics`. Layout:
-
-| Folder | What lives there |
-|---|---|
-| `frontend/src/api/` | REST client (`client.ts`, base URL is dynamic) + per-resource modules (`workflows.ts`, `auth.ts`, `pool.ts`, `controls.ts`, `metrics.ts`, `edits.ts`, `cluster.ts`). |
-| `frontend/src/hooks/` | One TanStack Query hook per query (`useWorkflows`, `useStats`, `usePool`, `useWorkflow`, `useActivities`, `useLastActivities`, `useMetricsHistory`, `useCluster`); mutations live in `useWorkflowControls` (run/stop/resume/restart + bulk) and `useEditPayload`. |
-| `frontend/src/contexts/` | `AuthContext` (login/logout/me; auto-rechecks on backend switch), `RefreshIntervalContext` (manual polling cadence in `localStorage`), `BackendContext` (list of API base URLs the operator can switch between). |
-| `frontend/src/pages/` | `LoginPage`, `WorkflowsPage`, `WorkflowDetailsPage`, `MetricsPage`. |
-| `frontend/src/components/` | Presentational pieces: `Header/` (tabs + backend select + refresh select), `StatsCards/`, `PoolGauge/`, `ClusterPanel/`, `WorkflowTable/`, `WorkflowControls/`, `BulkActionBar/`, `ActivityList/`, `JsonViewer/`, `StatusBadge/`, `RelativeTime/`, `PayloadEditDialog/`, `MetricsCharts/`, `Toast/`, `ProtectedRoute.tsx`. |
-| `frontend/src/types/` | Shared TS interfaces for `Workflow`, `Activity`, `PoolStats`, `AuthUser`, `MetricSample`, `cluster` (`NodeState`, `AggregatedState`, `RunningTaskDto`). |
-| `frontend/src/utils/` | `format.ts` (date helpers), `baseUrl.ts` (dynamic API base URL store), `toastBus.ts` (global error toast emitter). |
-
-### Features
-
-#### Workflows page (`/workflows`)
-- **Executor (Thread Pool)** panel — workers (active vs. free / max) and executor queue depth (current vs. slot capacity). Note: the executor queue capacity (default 100) is the number of tasks the thread pool can buffer internally — it is separate from the number of workflows waiting in the database. Backed by `GET /pool`.
-- **Cluster** panel — visible only when `workflow.instance.url` is configured and `GET /ui/state` returns at least one live instance. Shows: total live instance count (green chip), aggregate active workers / queued tasks / running workflows across the cluster. Each instance is listed with its URL, a per-instance worker gauge, queue depth, and running count. Clicking an instance row expands a list of currently running workflow ids and how long each has been executing. Backed by `GET /ui/state`.
-- **Stats cards** — `ALL`, `NEW`, `Ready to run`, `Waiting retry`, `Running`, `STOPPED`, `FINISHED`, `FAILED`. `Ready to run` and `Waiting retry` filter the list by `RETRY` in the DB (split by `nextRetryAt`); `Running` filters by the in-memory runtime registry — only ids the executor has actually started on a worker thread (not those still queued inside the executor). Cmd/Ctrl-click to multi-select; plain click replaces.
-- **Workflow list** — TanStack Table with id, type, state, **relative-time** Created / Last run / Next run (auto-updating, hover for absolute timestamp), current activity name, attempts, error. Click any header on `id`/`createdAt`/`state` to sort (server-side).
-- **Pagination** — page-size picker (10 / 20 / 50 / 100), persisted in `localStorage`.
-- **Multi-select + bulk actions** — checkbox column on each row. When ≥1 workflow is selected, a sticky `BulkActionBar` appears: `Run now`, `Stop`, `Resume`, `Restart`, plus "By time range…" which builds a `{from, to, states}` filter and dispatches against `/workflows/bulk/*`. Destructive actions (Restart) confirm before firing.
-- **"Next run"** ticks every second with an adaptive format. When the deadline has passed it counts upward (`+5s overdue`).
-
-#### Workflow details (`/workflows/:id`)
-- Meta block (created / started / next-run / activity count), single-workflow controls (`Run now` / `Stop` / `Resume` / `Restart` with confirm).
-- **Edit input** button on the workflow's initial payload (only in `NEW`/`RETRY`/`STOPPED`/`FAILED`) — opens `PayloadEditDialog` with optional JSON validation.
-- **Activities grouped by name** with `Restart from here` button on each group header (re-execute that activity and everything after it, earlier ones stay cached).
-- Each attempt expands to show input/output JSON; both fields have inline `Edit` buttons.
-- **JSON viewer** — inline preview with click-to-expand fullscreen dialog.
-
-#### Metrics (`/metrics`)
-- Window picker `5m / 30m / 1h / 6h / 24h / 7d / 14d` (persisted). Bucket size is chosen client-side so wide windows still fit ≤300 points.
-- **Pool & queue** chart (`pool_free` + executor queue depth over time).
-- **Workflows by state** chart with multi-select Autocomplete — operator adds/removes states; defaults to `RETRY / STOPPED / FAILED`.
-- **Throughput** chart computed client-side as the delta of cumulative `cnt_finished` / `cnt_failed` between adjacent buckets.
-
-#### Header (everywhere)
-- **Tabs** — `Workflows` / `Metrics`, synced with the URL.
-- **Backend switcher** — dropdown lists configured environments and a "Manage…" entry to add/remove. Switching clears React Query cache and re-runs `/auth/me`. State stored in `localStorage`. Cross-origin URLs require CORS on the backend.
-- **Refresh interval picker** — `Off / 2s / 5s / 10s / 30s`. Selection persists in `localStorage` and drives `refetchInterval` on every TanStack Query hook.
-- **Login page** at `/login` (only when [auth](#authentication) is enabled). When auth is disabled the UI runs as `anonymous` without a login screen.
-- **Global error toast** — any failed query/mutation (network, 5xx) surfaces a `Snackbar`; 401s are routed through the auth flow instead.
-
-### Dev mode
-
-```sh
-cd frontend
-npm install
-npm run dev    # Vite on :5173, proxies /temporal-mini/api → :8080
+```http
+GET /workflow/api/cluster/nodes
+```
+```json
+{
+  "self": "node-1",
+  "nodes": [
+    {
+      "id": "node-1",
+      "internalUrl": "http://app1:8080",
+      "externalUrl": "https://api.example.com/node-1",
+      "lastHeartbeat": "2026-05-17T10:42:01Z",
+      "self": true
+    },
+    {
+      "id": "node-2",
+      "internalUrl": "http://app2:8080",
+      "externalUrl": "https://api.example.com/node-2",
+      "lastHeartbeat": "2026-05-17T10:41:55Z",
+      "self": false
+    }
+  ]
+}
 ```
 
-Open `http://localhost:5173/temporal-mini/ui/` while your Spring app runs on `:8080`.
-
----
-
-## Authentication
-
-Authentication is **opt-in**. To enable session-based login in front of `/temporal-mini/**`:
-
-1. Add Spring Security to your app (the SDK declares `spring-boot-starter-security` as `optional`):
-
-   ```xml
-   <dependency>
-       <groupId>org.springframework.boot</groupId>
-       <artifactId>spring-boot-starter-security</artifactId>
-   </dependency>
-   ```
-
-2. Set the credentials in `application.properties` and flip the toggle:
-
-   ```properties
-   workflow.ui.security.enabled=true
-   workflow.ui.username=admin
-   workflow.ui.password={bcrypt}$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy
-   ```
-
-   Passwords are parsed by Spring Security's `DelegatingPasswordEncoder`, so prefix with the encoder id: `{bcrypt}…` for production, `{noop}…` for local dev.
-
-When enabled:
-
-- A `SecurityFilterChain` matches `/temporal-mini/**` and rejects anonymous requests.
-- `POST /temporal-mini/api/auth/login` accepts `{"username","password"}`, sets a session cookie, returns `{"username":"…"}`.
-- `POST /temporal-mini/api/auth/logout` invalidates the session.
-- `GET /temporal-mini/api/auth/me` returns `200 {username}` or `401`.
-- CSRF is disabled (same-origin SPA with `SameSite=Lax` cookies). HTTP Basic and form login are intentionally turned off.
-
-When disabled (`workflow.ui.security.enabled=false`, the default), all `/temporal-mini/**` endpoints are open and the SPA runs as `anonymous` with no login screen.
-
-### Override the user store
-
-To use multiple users, an external user store, or LDAP, define your own `UserDetailsService` (or `AuthenticationManager`) bean — the SDK's defaults are guarded by `@ConditionalOnMissingBean`.
+```http
+GET /workflow/api/cluster/local
+```
+```json
+{
+  "nodeId": "node-1",
+  "pool": { "active": 3, "queue": 7, "max": 8 },
+  "running": [
+    {
+      "taskId": "2a3b4c...",
+      "workflowId": "9f8e7d...",
+      "lockedAt": "2026-05-17T10:41:50Z",
+      "lockedUntil": "2026-05-17T10:42:50Z"
+    }
+  ]
+}
+```
 
 ---
 
@@ -413,264 +498,74 @@ To use multiple users, an external user store, or LDAP, define your own `UserDet
 
 | Property | Default | Purpose |
 |---|---|---|
-| `workflow.scheduler.enabled` | `true` | Turn the polling scheduler on/off. |
-| `workflow.scheduler.interval-ms` | `2000` | Poll interval (`@Scheduled` fixed delay). |
-| `workflow.scheduler.pool-size` | CPU count | Worker thread pool size. |
-| `workflow.scheduler.queue-capacity` | `100` | Executor task queue capacity. When full, the scheduler skips the poll entirely (back-pressure). |
-| `workflow.scheduler.thread-name-prefix` | `wflow-` | Prefix for worker thread names. |
-| `workflow.instance.url` | _(unset)_ | Public URL of this instance, e.g. `http://app1:8080`. **Required for multi-instance mode.** When set, `InstanceRegistryService`, `NodeStateController`, and `UiAggregatorController` are activated. |
-| `temporal-mini.ui.enabled` | `true` | Mount the REST API + dashboard. |
-| `workflow.ui.security.enabled` | `false` | Require login for `/temporal-mini/**`, `/internal/**`, `/ui/**`. Needs Spring Security on the classpath. |
-| `workflow.ui.username` | `admin` | Username of the single in-memory user provisioned when security is enabled. |
-| `workflow.ui.password` | `{noop}admin` | Password (with `{encoder}` prefix). Override in production. |
-| `workflow.metrics.enabled` | `true` | Append a row to `wflow.metric_sample` on the configured cadence; powers the metrics chart. |
-| `workflow.metrics.sample-interval-ms` | `10000` | Period between samples. |
-| `workflow.metrics.retention-days` | `14` | Rows older than this are deleted by the cleanup job. |
-| `workflow.metrics.cleanup-cron` | `0 0 3 * * *` | Cron for the retention sweep (default: 03:00 daily, server time). |
-
-The bean name is `workflowExecutor`. Define your own bean of the same name to override the executor entirely:
-
-```java
-@Bean(name = WorkflowCoreAutoConfiguration.EXECUTOR_BEAN, destroyMethod = "shutdown")
-public Executor workflowExecutor() { /* your custom executor */ }
-```
-
-### Why a bounded `ThreadPoolTaskExecutor`?
-
-The default thread pool is intentionally **not** `Executors.newCachedThreadPool()`. Cached pools are unbounded — under sustained load they will create unlimited threads and OOM the JVM. The default here is:
-
-- **fixed pool of `cpu count` threads** — predictable concurrency, fair to other code on the box;
-- **bounded queue (100)** — limits memory growth if the engine falls behind;
-- **`CallerRunsPolicy`** — when the queue is full, the scheduler thread runs the task itself, which both completes the work and naturally throttles the next poll (back-pressure);
-- **graceful shutdown** — `waitForTasksToCompleteOnShutdown=true`, `awaitTerminationSeconds=30`.
-
-Tune `pool-size` based on what your activities do: if they're CPU-heavy, stick close to `cpu count`; if they're mostly I/O (HTTP, DB), `2 × cpu count` to `4 × cpu count` is reasonable.
+| `workflow.worker-pool-size` | `4` | Number of worker threads processing tasks |
+| `workflow.poll-interval-ms` | `1000` | Worker loop poll interval |
+| `workflow.lock-timeout-seconds` | `60` | `locked_until = locked_at + this`. After this expires, TimeoutWatcher resets the task |
+| `workflow.retry-poll-interval-ms` | `2000` | RetryScheduler poll interval — how often `retries` is scanned for due retries |
+| `workflow.timeout-watcher-interval-ms` | `5000` | TimeoutWatcher poll interval |
+| `workflow.instance.id` | `default` | Unique node ID. **Must be set when multi-instance.** |
+| `workflow.instance.internal-url` | _(unset)_ | Internal network URL (private DNS, docker service name). Required when `external-url` is set. |
+| `workflow.instance.external-url` | _(unset)_ | Public URL for browser-side UI access. Enables multi-instance mode when set. |
 
 ---
 
-## Multi-instance deployment
+## Database schema
 
-`temporal-mini` supports running multiple application instances against the same PostgreSQL database. All instances share the same workflow queue — no configuration is needed to split work among them. Duplicate execution is prevented at the database level.
+The engine owns 7 tables in the **`public` schema** (no dedicated schema). Flyway runs them on startup.
 
-### How it works
+| Table | Purpose |
+|---|---|
+| `workflows` | One row per workflow run. `input`, `result` are JSONB. Holds final outcome. |
+| `tasks` | The work queue. One row per scheduled execution attempt. `FOR UPDATE SKIP LOCKED` is the heart of distribution. |
+| `activity_results` | Replay cache, one row per `(workflow_id, activity_name)`. Updated in place across retries (so live table stays slim). `result_type` stores the runtime class for type-safe replay. |
+| `retries` | Pending retries with `fire_at` schedule. `RetryScheduler` reads, inserts `tasks` rows, marks `processed=true`. |
+| `events` | Append-only audit log — `WORKFLOW_STARTED`/`COMPLETED`/`FAILED`, `ACTIVITY_STARTED`/`COMPLETED`/`FAILED`/`RETRYING`. **Not** the source of truth for replay; `activity_results` is. Used by UI / debugging / metrics. |
+| `signals` | Inbox for `Workflow.waitForSignal(...)`. Polled by waiting workflows; consumed signals are marked `consumed=true`. |
+| `instance_registry` | Heartbeat table for multi-instance discovery. Only populated when `workflow.instance.external-url` is set. |
+
+Flyway migrations:
 
 ```
-┌────────────┐   poll every 2s    ┌──────────────────────────────────┐
-│  Instance 1│ ─────────────────► │         wflow.workflow           │
-│            │   SELECT FOR UPDATE│  id │ state │ next_retry_at ...  │
-│ Scheduler  │   SKIP LOCKED      └──────────────────────────────────┘
-│ Executor   │ ◄──── row lock ─────────────┐
-└────────────┘                             │  same id, locked — skip
-┌────────────┐   poll every 2s             │
-│  Instance 2│ ─────────────────────────── ┘
-│ Scheduler  │
-│ Executor   │
-└────────────┘
+V1__workflows.sql
+V2__tasks.sql
+V3__events.sql
+V4__activity_results.sql
+V5__retries.sql
+V6__signals.sql
+V7__activity_result_type.sql      ← adds activity_results.result_type
+V8__tasks_locked_at.sql            ← adds tasks.locked_at
+V9__instance_registry.sql          ← instance registry table
 ```
 
-1. Each scheduler polls `findPendingWorkflows()` independently (plain `SELECT`, no lock).
-2. Before submitting each id to the thread pool, the scheduler checks `executor.getQueue().remainingCapacity()` — if the pool is already saturated it skips the entire poll.
-3. When a worker picks up an id it calls `WorkflowExecutor.tryExecute(id)`, which is a single `@Transactional` method:
-   - issues `SELECT … FOR UPDATE SKIP LOCKED WHERE id = :id`;
-   - if 0 rows returned (another instance won the lock) — returns immediately;
-   - if row returned — calls `engine.run(id)` in the same transaction, holding the lock until commit.
-4. Within one instance, `WorkflowRuntimeRegistry` additionally prevents the same id being submitted twice across overlapping scheduler polls (the `SUBMITTED` → `RUNNING` dedup guard).
+Notable indexes (all created by the migrations):
 
-### Enabling instance registration
-
-Set `workflow.instance.url` to the network-reachable URL of each instance. This activates three additional beans: `InstanceRegistryService`, `NodeStateController`, and `UiAggregatorController`.
-
-```properties
-# application.properties (or env var INSTANCE_URL)
-workflow.instance.url=http://app1:8080
-```
-
-On startup the instance writes a row to `wflow.instance_registry` and refreshes `last_heartbeat` every 10 s. On shutdown it deletes the row. "Live" is defined as `last_heartbeat > now() − 30 s`.
-
-### New endpoints (active only when `workflow.instance.url` is set)
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/internal/state` | Returns this node's live state: `nodeId`, `nodeUrl`, `queueSize` (executor queue depth), `activeCount` (running threads), `runningTasks` (list of `{workflowId, startedAtEpochMs}`). Secured under the same auth as `/temporal-mini/**`. |
-| `GET` | `/ui/state` | Reads live instances from `wflow.instance_registry`, fans out `GET /internal/state` to each via `RestClient`, and returns an aggregated `{nodes: [...]}`. Any instance in the cluster can be the aggregator. |
-
-### Docker Compose (3-instance example)
-
-A `Dockerfile` and `docker-compose.yml` are provided at the project root for local development and demo:
-
-```sh
-mvn package -Dfrontend.skip=false   # build the fat jar
-docker compose up --build            # starts postgres + app1 + app2 + app3
-```
-
-Instances listen on ports **8081 / 8082 / 8083**. Each instance receives its own `INSTANCE_URL` via an environment variable so Docker's internal DNS resolves inter-instance calls:
-
-```yaml
-app1:
-  environment:
-    INSTANCE_URL: http://app1:8080
-app2:
-  environment:
-    INSTANCE_URL: http://app2:8080
-app3:
-  environment:
-    INSTANCE_URL: http://app3:8080
-```
-
-Open `http://localhost:8081/temporal-mini/ui/` to see the dashboard — the **Cluster** panel will show all three instances.
-
-### Database schema addition
-
-`V8__instance_registry.sql` (applied automatically on first startup):
-
-```sql
-CREATE TABLE wflow.instance_registry (
-    id             VARCHAR(255) PRIMARY KEY,
-    url            VARCHAR(512) NOT NULL,
-    last_heartbeat TIMESTAMP    NOT NULL
-);
-```
-
----
-
-## Building the UI
-
-The frontend lives in `frontend/`. It builds straight into `src/main/resources/META-INF/resources/temporal-mini/ui/` so the SPA is bundled inside the SDK jar — no separate deployment, no static-host plumbing.
-
-### Standard `mvn package`
-
-`frontend-maven-plugin` (in the parent `pom.xml`) does this automatically during `generate-resources`:
-
-1. Downloads Node `${node.version}` into `frontend/.node/` (cached across builds).
-2. Runs `npm install` in `frontend/`.
-3. Runs `npm run build` (`tsc` + Vite) which writes the bundle to the resources path above.
-
-The plugin runs every `mvn` invocation from `generate-resources` onward. To skip the frontend build pass `-Dfrontend.skip=true`:
-
-```sh
-./mvnw -Dfrontend.skip=true package
-```
-
-This is useful when iterating on Java only or in CI stages where the bundle was built upstream.
-
-### Manual build
-
-```sh
-cd frontend
-npm install
-npm run build       # tsc strict typecheck + Vite production build
-npm run typecheck   # fast: types only, no bundle
-npm run dev         # dev server on :5173 with API proxy to :8080
-```
-
-`npm run build` writes into the Spring resources directory directly (configured in `vite.config.ts`), so a subsequent `mvn package` (with frontend skipped) just packages the existing bundle into the jar.
-
----
-
-## Operations
-
-### Database schema
-
-`temporal-mini` owns the `wflow` schema with six tables — two live, two history mirrors, plus metrics and migrator bookkeeping:
-
-Live (mutated by the engine, drive replay-cache):
-
-- `wflow.workflow` — one row per workflow. `started_at` is set on the first pickup; `finished_at` is set **only** when the workflow reaches `FINISHED` (it stays `NULL` for `FAILED`/`STOPPED`/in-flight). The `state` column stores `"BLOCKED"` for `STOPPED` and will transparently read `"RUNNABLE"` as `RETRY` for backward compatibility with older rows.
-- `wflow.activity` — one row per **(workflow id, activity name)**: the engine upserts this row on each attempt so it always reflects the latest state (`attempt` = latest attempt number, `success` = latest outcome, `started_at` = first-attempt start, `input_payload`/`output_payload`/`output_type`/`error_message` = latest values). `output_type` stores the FQN of the cached output's runtime class so replay can deserialize without a `Class<O>` token from the caller. `finished_at` is set **only** when the activity has successfully completed; while it is still retrying it stays `NULL`. Wiped by `engine.restart()` and `engine.restartFromActivity()`. The per-attempt audit lives in `wflow.activity_history`.
-
-History (append-only audit, never mutated, never deleted by `restart*`):
-
-- `wflow.workflow_history` — one row per call to `WorkflowEngine.run(Long)` (one scheduler pickup). Inserted at the start of the run, updated at the end with `finished_at`, `outcome` (`FINISHED`/`RETRY`/`FAILED`), `next_retry_at`, and `error_message`. `initial_state` records what state the workflow was in when this pickup began. `pickup_delay_ms` records how long the workflow was waiting between becoming eligible to run (`nextRetryAt` for retries, `createdAt` for first runs) and this pickup actually starting on a worker — captures scheduler poll latency plus executor-queue wait.
-- `wflow.activity_history` — one row per individual activity attempt. The live `wflow.activity` row is upserted in place across retries, but this table always **appends** a fresh row per attempt (so you can see "attempt 1 failed at T1, attempt 2 failed at T2, attempt 3 succeeded at T3" even though the live table only carries the latest snapshot). Has FKs to `wflow.workflow_history` (the wrapping pickup), `wflow.workflow` (the parent workflow), and `wflow.activity` (the live row). The `activity_id` FK uses `ON DELETE SET NULL` so `engine.restart()` can still wipe live activity rows — the history row survives with a null `activity_id` and intact `workflow_id` / `workflow_history_id`.
-
-Bookkeeping:
-
-- `wflow.metric_sample` — one row per metrics snapshot (timestamp PK, pool/queue counters and per-state counts including `cnt_retry`).
-- `wflow.instance_registry` — one row per live application instance (id, url, last_heartbeat). Written by `InstanceRegistryService`; only present when `workflow.instance.url` is configured. Used by `UiAggregatorController` to discover peers.
-- `wflow.sql_migrations` — applied version, name, applied-at timestamp.
-
-The migrator runs on startup, scans the classpath for `db/migration/temporal-mini/V*__*.sql`, applies any pending versions in order (each in its own transaction), and inserts a row into `wflow.sql_migrations`. Indexes — `idx_workflow_state_retry`, `idx_activity_workflow_name`, `idx_metric_sample_ts`, `idx_workflow_history_workflow_id_started`, `idx_activity_history_workflow_history_id`, `idx_activity_history_workflow_id_name`, `idx_activity_history_activity_id` — are created by those migrations. `V6` adds the nullable `wflow.workflow.finished_at` and `wflow.workflow_history.pickup_delay_ms` columns. `V7` adds `output_type VARCHAR(512)` to `wflow.activity` and `wflow.activity_history` so the engine can deserialize cached outputs on replay without the caller passing a `Class<O>` token. `V8` adds `wflow.instance_registry` for multi-instance coordination.
-
-> **Upgrading from a Flyway-era deployment.** Old installations have a `flyway_temporal_mini_history` table that the new migrator ignores. Once the new migrator has run successfully (check `SELECT * FROM wflow.sql_migrations`) you can drop the legacy table by hand: `DROP TABLE wflow.flyway_temporal_mini_history;`.
-
-### Concurrency
-
-**Within a single instance** — the scheduler tracks in-flight workflow ids in a `ConcurrentHashMap` (`WorkflowRuntimeRegistry`) so the same workflow is never queued twice across overlapping polls. Each entry carries a status: `SUBMITTED` is set when the scheduler calls `executor.execute(...)` (and is enough to block re-submission), and is flipped to `RUNNING` from inside the worker right before `engine.run(id)` — so the "RUNNING" view reflects what is actually executing, not what is still buffered in the executor's task queue. Within a single workflow, activities are sequential — there is no parallelism inside `run()`.
-
-**Across multiple instances** — all instances poll independently. The duplicate-execution guard is a database row lock: `WorkflowExecutor.tryExecute()` runs inside a single `@Transactional` that begins with `SELECT … FOR UPDATE SKIP LOCKED WHERE id = :id`. The instance that wins the lock proceeds to call `engine.run(id)`; any other instance that tries the same id at the same moment receives 0 rows back from the locked query and returns immediately. The lock is held for the entire duration of the run and is released atomically when the transaction commits (after `workflowRepository.save(entity)`). See [Multi-instance deployment](#multi-instance-deployment) for the full setup.
-
-### Observability
-
-Every activity and state transition is logged at INFO. Increase to DEBUG on `com.beeline.temporalmini` to see replay-skip messages and the per-poll heartbeat.
-
-#### Micrometer metrics
-
-`temporal-mini` instruments workflow and activity execution through the Micrometer facade — the SDK doesn't bind to a specific backend, so the client picks whichever registry they want (Prometheus, JMX, OTLP, CloudWatch, ...). Wiring is opt-in: the metric beans are guarded by `@ConditionalOnBean(MeterRegistry.class)`, so without Micrometer on the classpath nothing is registered and there is zero overhead.
-
-To enable it in a Spring Boot app, add the registry of your choice plus Actuator:
-
-```xml
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-actuator</artifactId>
-</dependency>
-<dependency>
-    <groupId>io.micrometer</groupId>
-    <artifactId>micrometer-registry-prometheus</artifactId>
-</dependency>
-```
-
-```properties
-management.endpoints.web.exposure.include=prometheus
-```
-
-Prometheus then scrapes `/actuator/prometheus`.
-
-**Exported gauges and counters:**
-
-| Metric | Type | What it measures |
-|---|---|---|
-| `temporalmini.workflows.new` | Counter | Total workflows ever created (increments on `engine.start()`). |
-| `temporalmini.workflows.running` | Gauge | Workflows actively executing in the thread pool right now (from `executor.getActiveCount()`). |
-| `temporalmini.workflows.queued` | Gauge | `NEW` + `RETRY` rows where `nextRetryAt <= now` — ready for the next poll. |
-| `temporalmini.workflows.waiting` | Gauge | `RETRY` rows where `nextRetryAt > now` — sleeping until their retry window opens. |
-| `temporalmini.workflows.stopped` | Gauge | Workflows manually paused. |
-| `temporalmini.workflows.finished` | Gauge | Workflows completed successfully. |
-| `temporalmini.workflows.failed` | Gauge | Workflows that exhausted all retries. |
-
-**Exported timers** (both publish percentile histograms — `_bucket` series for p50/p95/p99):
-
-| Metric | Tags | What it measures |
-|---|---|---|
-| `temporalmini.workflow.duration` | `workflow`, `status` ∈ `success` / `failure` | One attempt of `Workflow.run(ctx)`. |
-| `temporalmini.activity.duration` | `workflow`, `activity`, `status` ∈ `success` / `failure` | The user's activity function only — surrounding cache lookup and persistence not counted. |
-
-Each timer exports `_count` (invocations), `_sum` (total time) and `_max`. Average over a window is `rate(..._sum[5m]) / rate(..._count[5m])`.
+- `idx_tasks_poll (status, scheduled_at) WHERE status='PENDING'` — drives the worker poll
+- `idx_events_workflow (workflow_id, created_at)` — for UI timeline queries
+- `idx_retries_fire (fire_at) WHERE processed=false` — drives RetryScheduler
+- `idx_signals_lookup (workflow_id, signal_name, consumed)`
+- `idx_instance_registry_heartbeat (last_heartbeat)`
 
 ---
 
 ## FAQ
 
-**Does this scale to thousands of workflows?**
-The pulling model is fine for hundreds-to-low-thousands of concurrently in-flight workflows. Beyond that, look at Temporal proper.
-
 **What happens on JVM crash mid-activity?**
-The activity row is only written **after** the function returns or throws. A crash during the function leaves no row, so the next replay re-attempts the activity. Side-effects inside the function should therefore be idempotent.
+The `activity_results` row is only written **after** the activity body returns or throws — so if the JVM dies inside `payment.charge(...)`, no row exists. The next time a worker picks up the workflow, that activity gets re-executed. Make sure activity bodies are idempotent (request-id headers, INSERT … ON CONFLICT, etc.).
 
-**Can I pass complex objects through `nextPayload`?**
-Yes — `String` is just JSON in practice. The framework doesn't interpret it; deserialize it yourself in `run()`.
+**Can two replicas execute the same workflow at the same time?**
+No. `FOR UPDATE SKIP LOCKED` ensures only one replica wins the lock on a given `tasks` row. Other replicas see the row as locked and skip it. The lock is released only when the worker commits the claim transaction; after that the worker processes the task without holding the row.
 
-**How do I share results between activities?**
-Use the return value: `Order order = ctx.activity("fetch", policy, () -> backend.load(id));`. The result is serialized once on success and replayed on retry — the engine remembers the runtime class so you don't pass a `Class<O>` token. Pass the result as the input of the next activity (`ctx.activity("ship", order, policy, o -> shipper.send(o))`) — both the input and output get persisted for audit.
+**Do I have to use `@Activity` interfaces? Can I just call methods?**
+You have two options. Typed interfaces (`@Activity` + `Workflow.newActivityStub`) give you type safety and auto-naming. Or use `Workflow.activity(name, options, () -> ...)` and pass any lambda. Same engine semantics, different ergonomics.
 
-**Can I run code outside an activity in `run()`?**
-You can, but remember it runs on every replay. Keep it deterministic and side-effect-free (e.g. routing logic, parsing the input payload).
+**Why is the workflow execution synchronous? In real Temporal, the workflow worker is freed up while the activity runs.**
+This engine is designed to be lightweight. Activities run in the same worker thread as the workflow (with a `CompletableFuture` wrapper for timeout enforcement). For short-to-medium activities (seconds, minutes) this is simpler and faster — no replay round-trip per step. For very long activities (hours) the worker slot is held for that whole time; consider sizing the pool accordingly or splitting the long step.
 
-**Can I point the UI at a remote `temporal-mini` deployment?**
-Yes — the header has a backend switcher. Add an entry with the absolute base URL (e.g. `https://prod.example.com/temporal-mini/api`) and select it. The remote backend must allow CORS from the SPA host with `Access-Control-Allow-Credentials: true` so the session cookie travels. Same-origin paths like `/temporal-mini/api` always work.
+**Do events drive replay?**
+No. **`activity_results` is the source of truth for replay.** `events` is an append-only audit log for UI and debugging.
 
-**My UI was working before this upgrade — why did the `/block` and `/unblock` endpoints disappear?**
-They were renamed to `/stop` and `/resume`. Same semantics; the database string for the `STOPPED` state is still `"BLOCKED"` so existing workflows keep working without a data migration.
+**Does the engine support workflow versioning?**
+Not built-in. If you change the activity order in a workflow that's already running, the cache lookup by activity_name may return stale results. For breaking changes: rename the workflow type, or restart-from-activity (purge cached rows and re-execute).
 
-**I'm upgrading from a version that had `RUNNABLE` state — do I need to migrate data?**
-No. `WorkflowStateConverter` transparently maps the string `"RUNNABLE"` on read to the new `RETRY` enum value. The migration `V4__rename_runnable_to_retry.sql` renames the `cnt_runnable` column in `wflow.metric_sample` to `cnt_retry` — this runs automatically on startup.
+**Where is the UI?**
+The Java backend is rebuilt. The previous React SPA is being adapted to the new schema and will be wired in via `web/controller/*` REST endpoints — currently only the cluster endpoints are in place. See `web/dto/*` for the shape of data the UI will consume.

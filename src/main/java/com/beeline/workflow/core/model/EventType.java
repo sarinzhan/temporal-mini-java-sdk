@@ -1,0 +1,14 @@
+package com.beeline.workflow.core.model;
+
+public enum EventType {
+    WORKFLOW_STARTED,
+    WORKFLOW_COMPLETED,
+    WORKFLOW_FAILED,
+    WORKFLOW_CANCELLED,
+    WORKFLOW_RESUMED,
+    ACTIVITY_STARTED,
+    ACTIVITY_COMPLETED,
+    ACTIVITY_FAILED,
+    ACTIVITY_RETRYING,
+    SIGNAL_SENT
+}
