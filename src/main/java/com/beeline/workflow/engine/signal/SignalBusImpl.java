@@ -12,7 +12,6 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
-import java.util.UUID;
 
 public class SignalBusImpl implements SignalBus {
 
@@ -34,7 +33,7 @@ public class SignalBusImpl implements SignalBus {
 
     @Override
     @Transactional
-    public void send(UUID workflowId, String signalName, Object payload) {
+    public void send(Long workflowId, String signalName, Object payload) {
         Signal s = new Signal();
         s.setWorkflowId(workflowId);
         s.setSignalName(signalName);
@@ -45,7 +44,7 @@ public class SignalBusImpl implements SignalBus {
     }
 
     @Override
-    public Object await(UUID workflowId, String signalName, Duration timeout) {
+    public Object await(Long workflowId, String signalName, Duration timeout) {
         Instant deadline = Instant.now().plus(timeout);
         while (Instant.now().isBefore(deadline)) {
             Object payload = tryClaim(workflowId, signalName);
@@ -61,7 +60,7 @@ public class SignalBusImpl implements SignalBus {
         return null;
     }
 
-    private Object tryClaim(UUID workflowId, String signalName) {
+    private Object tryClaim(Long workflowId, String signalName) {
         return transactionTemplate.execute(status -> {
             Optional<Signal> opt = signalRepository.claimFirstUnconsumed(workflowId, signalName);
             if (opt.isEmpty()) return null;

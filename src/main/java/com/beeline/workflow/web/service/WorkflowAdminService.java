@@ -21,7 +21,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.UUID;
 
 public class WorkflowAdminService {
 
@@ -49,7 +48,7 @@ public class WorkflowAdminService {
     }
 
     @Transactional
-    public void cancel(UUID workflowId) {
+    public void cancel(Long workflowId) {
         WorkflowInstance wf = workflowRepository.findById(workflowId)
                 .orElseThrow(() -> new IllegalArgumentException("workflow not found: " + workflowId));
         if (wf.getStatus() == WorkflowStatus.COMPLETED || wf.getStatus() == WorkflowStatus.FAILED) {
@@ -78,7 +77,7 @@ public class WorkflowAdminService {
     }
 
     @Transactional
-    public void resume(UUID workflowId) {
+    public void resume(Long workflowId) {
         WorkflowInstance wf = workflowRepository.findById(workflowId)
                 .orElseThrow(() -> new IllegalArgumentException("workflow not found: " + workflowId));
         if (wf.getStatus() != WorkflowStatus.CANCELLED) {
@@ -109,7 +108,7 @@ public class WorkflowAdminService {
     }
 
     @Transactional
-    public void retryDeadActivity(UUID workflowId, String activityName) {
+    public void retryDeadActivity(Long workflowId, String activityName) {
         ActivityResult ar = activityResultRepository.findByWorkflowIdAndActivityName(workflowId, activityName)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "activity not found: " + workflowId + "/" + activityName));
@@ -144,7 +143,7 @@ public class WorkflowAdminService {
     }
 
     @Transactional
-    public void sendSignal(UUID workflowId, String signalName, String payload) {
+    public void sendSignal(Long workflowId, String signalName, String payload) {
         if (signalName == null || signalName.isBlank()) {
             throw new IllegalArgumentException("signalName is required");
         }
@@ -158,7 +157,7 @@ public class WorkflowAdminService {
         log.info("Signal {} sent to workflow {}", signalName, workflowId);
     }
 
-    private void saveEvent(UUID workflowId, EventType type, String activityName, Integer attempt, String data) {
+    private void saveEvent(Long workflowId, EventType type, String activityName, Integer attempt, String data) {
         Event e = new Event();
         e.setWorkflowId(workflowId);
         e.setEventType(type);

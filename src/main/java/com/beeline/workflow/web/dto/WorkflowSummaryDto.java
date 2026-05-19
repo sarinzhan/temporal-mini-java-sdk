@@ -3,10 +3,9 @@ package com.beeline.workflow.web.dto;
 import com.beeline.workflow.core.model.WorkflowStatus;
 
 import java.time.Instant;
-import java.util.UUID;
 
 public record WorkflowSummaryDto(
-        UUID id,
+        Long id,
         String workflowType,
         WorkflowStatus status,
         Instant startTime,

@@ -13,7 +13,7 @@ import java.time.Instant;
 @Getter
 @Setter
 @Entity
-@Table(name = "activity_option_overrides")
+@Table(name = "activity_option_overrides", schema = "wflow")
 public class ActivityOptionOverride {
 
     @Id

@@ -12,7 +12,7 @@ import java.time.Instant;
 @Getter
 @Setter
 @Entity
-@Table(name = "instance_registry")
+@Table(name = "instance_registry", schema = "wflow")
 public class InstanceRegistryEntity {
 
     @Id

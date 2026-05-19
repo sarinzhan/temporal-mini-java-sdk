@@ -12,20 +12,19 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
-import java.util.UUID;
 
 @Getter
 @Setter
 @Entity
-@Table(name = "signals")
+@Table(name = "signals", schema = "wflow")
 public class Signal {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    private UUID id;
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
 
     @Column(name = "workflow_id", nullable = false)
-    private UUID workflowId;
+    private Long workflowId;
 
     @Column(name = "signal_name", nullable = false)
     private String signalName;

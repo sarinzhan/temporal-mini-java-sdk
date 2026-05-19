@@ -12,8 +12,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.UUID;
-
 @RestController
 @RequestMapping("/workflow/api/workflows")
 @CrossOrigin(origins = "*")
@@ -26,25 +24,25 @@ public class WorkflowAdminController {
     }
 
     @PostMapping("/{id}/cancel")
-    public AdminActionResponse cancel(@PathVariable UUID id) {
+    public AdminActionResponse cancel(@PathVariable Long id) {
         admin.cancel(id);
         return AdminActionResponse.success();
     }
 
     @PostMapping("/{id}/resume")
-    public AdminActionResponse resume(@PathVariable UUID id) {
+    public AdminActionResponse resume(@PathVariable Long id) {
         admin.resume(id);
         return AdminActionResponse.success();
     }
 
     @PostMapping("/{id}/signal")
-    public AdminActionResponse signal(@PathVariable UUID id, @RequestBody SignalRequest body) {
+    public AdminActionResponse signal(@PathVariable Long id, @RequestBody SignalRequest body) {
         admin.sendSignal(id, body.signalName(), body.payload());
         return AdminActionResponse.success();
     }
 
     @PostMapping("/{id}/activities/{activityName}/retry")
-    public AdminActionResponse retry(@PathVariable UUID id, @PathVariable String activityName) {
+    public AdminActionResponse retry(@PathVariable Long id, @PathVariable String activityName) {
         admin.retryDeadActivity(id, activityName);
         return AdminActionResponse.success();
     }

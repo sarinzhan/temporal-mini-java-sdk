@@ -8,13 +8,12 @@ import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.UUID;
 
 @Repository
-public interface RetryRepository extends JpaRepository<RetryRecord, UUID> {
+public interface RetryRepository extends JpaRepository<RetryRecord, Long> {
 
     @Query(value = """
-            SELECT * FROM retries
+            SELECT * FROM wflow.retries
             WHERE processed = FALSE AND fire_at <= :now
             ORDER BY fire_at ASC
             LIMIT :batchSize
@@ -22,5 +21,5 @@ public interface RetryRepository extends JpaRepository<RetryRecord, UUID> {
             """, nativeQuery = true)
     List<RetryRecord> pollDue(@Param("now") Instant now, @Param("batchSize") int batchSize);
 
-    List<RetryRecord> findByWorkflowIdAndProcessedFalseOrderByFireAtAsc(UUID workflowId);
+    List<RetryRecord> findByWorkflowIdAndProcessedFalseOrderByFireAtAsc(Long workflowId);
 }

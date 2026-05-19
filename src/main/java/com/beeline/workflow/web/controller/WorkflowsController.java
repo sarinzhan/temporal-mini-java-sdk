@@ -17,7 +17,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.UUID;
 
 @RestController
 @RequestMapping("/workflow/api/workflows")
@@ -50,17 +49,17 @@ public class WorkflowsController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<WorkflowDetailDto> one(@PathVariable UUID id) {
+    public ResponseEntity<WorkflowDetailDto> one(@PathVariable Long id) {
         return query.detail(id).map(ResponseEntity::ok).orElse(ResponseEntity.notFound().build());
     }
 
     @GetMapping("/{id}/events")
-    public List<EventDto> events(@PathVariable UUID id) {
+    public List<EventDto> events(@PathVariable Long id) {
         return query.events(id);
     }
 
     @GetMapping("/{id}/pending-activities")
-    public List<PendingActivityDto> pending(@PathVariable UUID id) {
+    public List<PendingActivityDto> pending(@PathVariable Long id) {
         return query.pendingActivities(id);
     }
 }

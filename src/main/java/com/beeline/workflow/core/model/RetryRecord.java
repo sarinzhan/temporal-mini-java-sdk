@@ -10,23 +10,22 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.time.Instant;
-import java.util.UUID;
 
 @Getter
 @Setter
 @Entity
-@Table(name = "retries")
+@Table(name = "retries", schema = "wflow")
 public class RetryRecord {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    private UUID id;
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
 
     @Column(name = "task_id", nullable = false)
-    private UUID taskId;
+    private Long taskId;
 
     @Column(name = "workflow_id", nullable = false)
-    private UUID workflowId;
+    private Long workflowId;
 
     @Column(name = "activity_name")
     private String activityName;

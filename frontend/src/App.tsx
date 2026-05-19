@@ -7,6 +7,7 @@ import { AppShell } from '@/components/layout/AppShell';
 import { WorkflowsPage } from '@/pages/WorkflowsPage';
 import { WorkflowDetailPage } from '@/pages/WorkflowDetailPage';
 import { MetricsPage } from '@/pages/MetricsPage';
+import { Toaster } from '@/components/ui/Toaster';
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
               </Route>
             </Routes>
           </BrowserRouter>
+          <Toaster />
         </TooltipProvider>
       </QueryClientProvider>
     </ThemeProvider>

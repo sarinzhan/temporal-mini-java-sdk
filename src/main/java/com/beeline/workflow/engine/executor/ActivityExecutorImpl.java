@@ -17,7 +17,8 @@ import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.RetryRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JavaType;
 import tools.jackson.databind.ObjectMapper;
 
@@ -25,7 +26,6 @@ import java.lang.reflect.Type;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -42,25 +42,29 @@ public class ActivityExecutorImpl implements ActivityExecutor {
     private final EventRepository eventRepository;
     private final RetryRepository retryRepository;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
     private final ExecutorService activityThreadPool;
     private final java.util.function.BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver;
 
     public ActivityExecutorImpl(ActivityResultRepository activityResultRepository,
                                 EventRepository eventRepository,
                                 RetryRepository retryRepository,
-                                ObjectMapper objectMapper) {
-        this(activityResultRepository, eventRepository, retryRepository, objectMapper, (name, opts) -> opts);
+                                ObjectMapper objectMapper,
+                                PlatformTransactionManager transactionManager) {
+        this(activityResultRepository, eventRepository, retryRepository, objectMapper, transactionManager, (name, opts) -> opts);
     }
 
     public ActivityExecutorImpl(ActivityResultRepository activityResultRepository,
                                 EventRepository eventRepository,
                                 RetryRepository retryRepository,
                                 ObjectMapper objectMapper,
+                                PlatformTransactionManager transactionManager,
                                 java.util.function.BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver) {
         this.activityResultRepository = activityResultRepository;
         this.eventRepository = eventRepository;
         this.retryRepository = retryRepository;
         this.objectMapper = objectMapper;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.optionsResolver = optionsResolver;
         this.activityThreadPool = Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r, "wf-activity-" + System.nanoTime());
@@ -70,17 +74,18 @@ public class ActivityExecutorImpl implements ActivityExecutor {
     }
 
     @Override
-    @Transactional
     public Object execute(String activityName,
                           ActivityOptions options,
                           Type returnType,
                           Supplier<Object> invocation) {
         WorkflowContext ctx = WorkflowContextHolder.require();
-        UUID workflowId = ctx.getWorkflowId();
+        Long workflowId = ctx.getWorkflowId();
         options = optionsResolver.apply(activityName, options);
 
-        Optional<ActivityResult> existing =
-                activityResultRepository.findByWorkflowIdAndActivityName(workflowId, activityName);
+        Long wfId = workflowId;
+        String actName = activityName;
+        Optional<ActivityResult> existing = transactionTemplate.execute(s ->
+                activityResultRepository.findByWorkflowIdAndActivityName(wfId, actName));
 
         if (existing.isPresent() && "COMPLETED".equals(existing.get().getStatus())) {
             log.debug("[{}/{}] activity replay-cached", workflowId, activityName);
@@ -130,23 +135,27 @@ public class ActivityExecutorImpl implements ActivityExecutor {
             return failOrRetry(workflowId, activityName, attempt, options, re, existing.orElse(null));
         }
 
-        ActivityResult ar = existing.orElseGet(ActivityResult::new);
-        ar.setWorkflowId(workflowId);
-        ar.setActivityName(activityName);
-        ar.setStatus("COMPLETED");
-        ar.setResult(serialize(result));
-        ar.setResultType(result != null ? result.getClass().getName() : null);
-        ar.setError(null);
-        ar.setAttempt(attempt);
-        if (ar.getCreatedAt() == null) ar.setCreatedAt(Instant.now());
-        activityResultRepository.save(ar);
+        final Object finalResult = result;
+        final int finalAttempt = attempt;
+        transactionTemplate.executeWithoutResult(s -> {
+            ActivityResult ar = existing.orElseGet(ActivityResult::new);
+            ar.setWorkflowId(wfId);
+            ar.setActivityName(actName);
+            ar.setStatus("COMPLETED");
+            ar.setResult(serialize(finalResult));
+            ar.setResultType(finalResult != null ? finalResult.getClass().getName() : null);
+            ar.setError(null);
+            ar.setAttempt(finalAttempt);
+            if (ar.getCreatedAt() == null) ar.setCreatedAt(Instant.now());
+            activityResultRepository.save(ar);
+        });
 
         saveEvent(workflowId, EventType.ACTIVITY_COMPLETED, activityName, attempt, serialize(result));
         log.info("[{}/{}] activity COMPLETED attempt={}", workflowId, activityName, attempt);
         return result;
     }
 
-    private Object failOrRetry(UUID workflowId,
+    private Object failOrRetry(Long workflowId,
                                String activityName,
                                int attempt,
                                ActivityOptions options,
@@ -156,31 +165,36 @@ public class ActivityExecutorImpl implements ActivityExecutor {
         boolean noRetry = cause instanceof NonRetryableException || policy.isNoRetry(cause);
         boolean exhausted = attempt >= policy.getMaxAttempts();
         boolean willRetry = !noRetry && !exhausted;
+        Instant fireAt = willRetry ? Instant.now().plus(policy.nextDelay(attempt)) : null;
 
-        ActivityResult ar = existing != null ? existing : new ActivityResult();
-        ar.setWorkflowId(workflowId);
-        ar.setActivityName(activityName);
-        ar.setAttempt(attempt);
-        ar.setError(safeMessage(cause));
-        ar.setStatus(willRetry ? "FAILED" : "DEAD");
-        if (ar.getCreatedAt() == null) ar.setCreatedAt(Instant.now());
-        activityResultRepository.save(ar);
+        transactionTemplate.executeWithoutResult(s -> {
+            ActivityResult ar = existing != null ? existing : new ActivityResult();
+            ar.setWorkflowId(workflowId);
+            ar.setActivityName(activityName);
+            ar.setAttempt(attempt);
+            ar.setError(safeMessage(cause));
+            ar.setStatus(willRetry ? "FAILED" : "DEAD");
+            if (ar.getCreatedAt() == null) ar.setCreatedAt(Instant.now());
+            activityResultRepository.save(ar);
+
+            if (willRetry) {
+                RetryRecord r = new RetryRecord();
+                r.setWorkflowId(workflowId);
+                r.setActivityName(activityName);
+                r.setAttempt(attempt);
+                r.setMaxAttempts(policy.getMaxAttempts());
+                r.setFireAt(fireAt);
+                r.setReason(safeMessage(cause));
+                r.setProcessed(false);
+                WorkflowContext ctx = WorkflowContextHolder.current();
+                if (ctx instanceof WorkflowContextImpl impl && impl.getCurrentTaskId() != null) {
+                    r.setTaskId(impl.getCurrentTaskId());
+                }
+                retryRepository.save(r);
+            }
+        });
 
         if (willRetry) {
-            RetryRecord r = new RetryRecord();
-            r.setWorkflowId(workflowId);
-            r.setActivityName(activityName);
-            r.setAttempt(attempt);
-            r.setMaxAttempts(policy.getMaxAttempts());
-            Instant fireAt = Instant.now().plus(policy.nextDelay(attempt));
-            r.setFireAt(fireAt);
-            r.setReason(safeMessage(cause));
-            r.setProcessed(false);
-            WorkflowContext ctx = WorkflowContextHolder.current();
-            if (ctx instanceof WorkflowContextImpl impl && impl.getCurrentTaskId() != null) {
-                r.setTaskId(impl.getCurrentTaskId());
-            }
-            retryRepository.save(r);
             saveEvent(workflowId, EventType.ACTIVITY_RETRYING, activityName, attempt, safeMessage(cause));
             log.warn("[{}/{}] activity FAILED attempt={} — retrying at {}", workflowId, activityName, attempt, fireAt);
         } else {
@@ -192,14 +206,16 @@ public class ActivityExecutorImpl implements ActivityExecutor {
         throw new ActivityFailureException(activityName, attempt, safeMessage(cause), cause);
     }
 
-    private void saveEvent(UUID workflowId, EventType type, String activityName, Integer attempt, String data) {
-        Event e = new Event();
-        e.setWorkflowId(workflowId);
-        e.setEventType(type);
-        e.setActivityName(activityName);
-        e.setAttempt(attempt);
-        e.setData(data);
-        eventRepository.save(e);
+    private void saveEvent(Long workflowId, EventType type, String activityName, Integer attempt, String data) {
+        transactionTemplate.executeWithoutResult(s -> {
+            Event e = new Event();
+            e.setWorkflowId(workflowId);
+            e.setEventType(type);
+            e.setActivityName(activityName);
+            e.setAttempt(attempt);
+            e.setData(data);
+            eventRepository.save(e);
+        });
     }
 
     private String serialize(Object value) {

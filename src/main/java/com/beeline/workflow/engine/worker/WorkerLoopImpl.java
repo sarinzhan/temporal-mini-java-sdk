@@ -99,7 +99,7 @@ private List<Task> claimBatch(int batchSize) {
         });
     }
 
-    private void releaseClaim(java.util.UUID taskId) {
+    private void releaseClaim(Long taskId) {
         transactionTemplate.executeWithoutResult(s -> {
             Task fresh = taskRepository.findById(taskId).orElse(null);
             if (fresh == null) return;
@@ -122,7 +122,7 @@ private List<Task> claimBatch(int batchSize) {
         finalizeTask(task.getId(), outcome);
     }
 
-    private void finalizeTask(java.util.UUID taskId, WorkflowExecutor.Outcome outcome) {
+    private void finalizeTask(Long taskId, WorkflowExecutor.Outcome outcome) {
         transactionTemplate.executeWithoutResult(s -> {
             Task fresh = taskRepository.findById(taskId).orElse(null);
             if (fresh == null) return;

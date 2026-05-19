@@ -10,16 +10,12 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
-
 import java.time.Instant;
-import java.util.UUID;
 
 @Getter
 @Setter
 @Entity
-@Table(name = "events")
+@Table(name = "events", schema = "wflow")
 public class Event {
 
     @Id
@@ -27,7 +23,7 @@ public class Event {
     private Long id;
 
     @Column(name = "workflow_id", nullable = false)
-    private UUID workflowId;
+    private Long workflowId;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "event_type", nullable = false)
@@ -39,8 +35,7 @@ public class Event {
     @Column(name = "attempt")
     private Integer attempt;
 
-    @Column(name = "data", columnDefinition = "jsonb")
-    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "data")
     private String data;
 
     @Column(name = "created_at", nullable = false, updatable = false)

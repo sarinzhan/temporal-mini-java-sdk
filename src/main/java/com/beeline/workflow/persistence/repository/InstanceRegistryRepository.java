@@ -13,7 +13,7 @@ import java.util.List;
 public interface InstanceRegistryRepository extends JpaRepository<InstanceRegistryEntity, String> {
 
     @Query(value = """
-            SELECT * FROM instance_registry
+            SELECT * FROM wflow.instance_registry
             WHERE last_heartbeat > :staleSince
             ORDER BY id ASC
             """, nativeQuery = true)

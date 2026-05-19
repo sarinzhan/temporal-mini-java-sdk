@@ -38,12 +38,26 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.PlatformTransactionManager;
 import tools.jackson.databind.ObjectMapper;
 
+import javax.sql.DataSource;
+
 @AutoConfiguration
 @EnableScheduling
 @EnableConfigurationProperties(WorkflowProperties.class)
 @EnableJpaRepositories(basePackages = "com.beeline.workflow.persistence.repository")
 @EntityScan(basePackages = "com.beeline.workflow.core.model")
 public class WorkflowAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowSchemaInitializer workflowSchemaInitializer(DataSource dataSource) {
+        return new WorkflowSchemaInitializer(dataSource);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowStartupBanner workflowStartupBanner(WorkflowProperties properties) {
+        return new WorkflowStartupBanner(properties);
+    }
 
     @Bean
     @ConditionalOnMissingBean
@@ -63,13 +77,15 @@ public class WorkflowAutoConfiguration {
                                              EventRepository eventRepository,
                                              RetryRepository retryRepository,
                                              ObjectMapper objectMapper,
+                                             PlatformTransactionManager transactionManager,
                                              org.springframework.beans.factory.ObjectProvider<com.beeline.workflow.web.service.ActivityOptionsOverrideService> overrideProvider) {
         com.beeline.workflow.web.service.ActivityOptionsOverrideService overrides = overrideProvider.getIfAvailable();
         if (overrides == null) {
-            return new ActivityExecutorImpl(activityResultRepository, eventRepository, retryRepository, objectMapper);
+            return new ActivityExecutorImpl(activityResultRepository, eventRepository, retryRepository,
+                    objectMapper, transactionManager);
         }
-        return new ActivityExecutorImpl(activityResultRepository, eventRepository, retryRepository, objectMapper,
-                overrides::resolve);
+        return new ActivityExecutorImpl(activityResultRepository, eventRepository, retryRepository,
+                objectMapper, transactionManager, overrides::resolve);
     }
 
     @Bean
@@ -133,7 +149,7 @@ public class WorkflowAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public WorkflowClient workflowClient(WorkflowRepository workflowRepository,
+    public WorkflowClient workflowClient1(WorkflowRepository workflowRepository,
                                          TaskRepository taskRepository,
                                          WorkflowRegistry workflowRegistry,
                                          ObjectMapper objectMapper) {

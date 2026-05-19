@@ -14,20 +14,19 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
-import java.util.UUID;
 
 @Getter
 @Setter
 @Entity
-@Table(name = "tasks")
+@Table(name = "tasks", schema = "wflow")
 public class Task {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    private UUID id;
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
 
     @Column(name = "workflow_id", nullable = false)
-    private UUID workflowId;
+    private Long workflowId;
 
     @Column(name = "task_type", nullable = false)
     private String taskType;

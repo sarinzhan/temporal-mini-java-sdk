@@ -6,11 +6,10 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 
 @Repository
-public interface ActivityResultRepository extends JpaRepository<ActivityResult, UUID> {
-    Optional<ActivityResult> findByWorkflowIdAndActivityName(UUID workflowId, String activityName);
+public interface ActivityResultRepository extends JpaRepository<ActivityResult, Long> {
+    Optional<ActivityResult> findByWorkflowIdAndActivityName(Long workflowId, String activityName);
 
-    List<ActivityResult> findByWorkflowIdOrderByCreatedAtAsc(UUID workflowId);
+    List<ActivityResult> findByWorkflowIdOrderByCreatedAtAsc(Long workflowId);
 }

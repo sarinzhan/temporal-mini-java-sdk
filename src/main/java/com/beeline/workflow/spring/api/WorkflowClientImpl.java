@@ -13,7 +13,6 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
-import java.util.UUID;
 
 public class WorkflowClientImpl implements WorkflowClient {
 
@@ -36,7 +35,7 @@ public class WorkflowClientImpl implements WorkflowClient {
 
     @Override
     @Transactional
-    public UUID startWorkflow(String workflowType, Object input) {
+    public Long startWorkflow(String workflowType, Object input) {
         if (!workflowRegistry.contains(workflowType)) {
             throw new IllegalArgumentException("Unknown workflow type: " + workflowType);
         }

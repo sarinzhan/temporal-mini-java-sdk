@@ -13,21 +13,20 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
-import java.util.UUID;
 
 @Getter
 @Setter
 @Entity
-@Table(name = "activity_results",
+@Table(name = "activity_results", schema = "wflow",
         uniqueConstraints = @UniqueConstraint(columnNames = {"workflow_id", "activity_name"}))
 public class ActivityResult {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    private UUID id;
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
 
     @Column(name = "workflow_id", nullable = false)
-    private UUID workflowId;
+    private Long workflowId;
 
     @Column(name = "activity_name", nullable = false)
     private String activityName;

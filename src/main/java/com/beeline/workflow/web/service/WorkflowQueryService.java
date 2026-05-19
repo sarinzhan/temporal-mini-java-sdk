@@ -17,17 +17,17 @@ import com.beeline.workflow.web.dto.WorkflowSummaryDto;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 
 public class WorkflowQueryService {
 
@@ -65,42 +65,62 @@ public class WorkflowQueryService {
                 case "running" -> effStatuses = List.of(WorkflowStatus.RUNNING, WorkflowStatus.PENDING);
                 case "today" -> effFrom = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOffset.UTC);
                 case "last-hour", "lasthour" -> effFrom = now.minus(Duration.ofHours(1));
-                case "all" -> { /* no-op */ }
-                default -> { /* unknown -> ignored */ }
+                default -> { /* "all" or unknown -> no-op */ }
             }
         }
 
-        boolean hasStatuses = effStatuses != null && !effStatuses.isEmpty();
-        Sort sortSpec = parseSort(sort);
-        PageRequest pageable = PageRequest.of(page, size, sortSpec);
+        String typeFilter = blankToNull(workflowType);
+        Long idFilter = parseId(idText);
+        List<WorkflowStatus> statusFilter = (effStatuses != null && !effStatuses.isEmpty()) ? effStatuses : null;
 
-        Page<WorkflowInstance> result = workflowRepository.search(
-                hasStatuses,
-                hasStatuses ? effStatuses : List.of(WorkflowStatus.PENDING),
-                blankToNull(workflowType),
-                blankToNull(idText),
-                effFrom,
-                effTo,
-                pageable);
+        Specification<WorkflowInstance> spec = buildSpec(statusFilter, typeFilter, idFilter, effFrom, effTo);
+        PageRequest pageable = PageRequest.of(page, size, parseSort(sort));
 
+        Page<WorkflowInstance> result = workflowRepository.findAll(spec, pageable);
         return PageResponse.of(result, WorkflowQueryService::toSummary);
+    }
+
+    private static Specification<WorkflowInstance> buildSpec(List<WorkflowStatus> statuses,
+                                                             String workflowType,
+                                                             Long id,
+                                                             Instant from,
+                                                             Instant to) {
+        return (root, query, cb) -> {
+            List<jakarta.persistence.criteria.Predicate> preds = new ArrayList<>();
+            if (statuses != null && !statuses.isEmpty()) {
+                preds.add(root.get("status").in(statuses));
+            }
+            if (workflowType != null) {
+                preds.add(cb.equal(root.get("workflowType"), workflowType));
+            }
+            if (id != null) {
+                preds.add(cb.equal(root.get("id"), id));
+            }
+            if (from != null) {
+                preds.add(cb.greaterThanOrEqualTo(root.get("createdAt"), from));
+            }
+            if (to != null) {
+                preds.add(cb.lessThanOrEqualTo(root.get("createdAt"), to));
+            }
+            return preds.isEmpty() ? cb.conjunction() : cb.and(preds.toArray(new jakarta.persistence.criteria.Predicate[0]));
+        };
     }
 
     public List<String> workflowTypes() {
         return workflowRepository.findAllWorkflowTypes();
     }
 
-    public Optional<WorkflowDetailDto> detail(UUID id) {
+    public Optional<WorkflowDetailDto> detail(Long id) {
         return workflowRepository.findById(id).map(WorkflowQueryService::toDetail);
     }
 
-    public List<EventDto> events(UUID workflowId) {
+    public List<EventDto> events(Long workflowId) {
         return eventRepository.findByWorkflowIdOrderByCreatedAtAsc(workflowId).stream()
                 .map(WorkflowQueryService::toEvent)
                 .toList();
     }
 
-    public List<PendingActivityDto> pendingActivities(UUID workflowId) {
+    public List<PendingActivityDto> pendingActivities(Long workflowId) {
         List<ActivityResult> results = activityResultRepository.findByWorkflowIdOrderByCreatedAtAsc(workflowId);
         Map<String, ActivityResult> byName = new HashMap<>();
         for (ActivityResult r : results) {
@@ -158,6 +178,11 @@ public class WorkflowQueryService {
 
     private static String blankToNull(String v) {
         return v == null || v.isBlank() ? null : v;
+    }
+
+    private static Long parseId(String v) {
+        if (v == null || v.isBlank()) return null;
+        try { return Long.parseLong(v.trim()); } catch (NumberFormatException e) { return null; }
     }
 
     private static WorkflowSummaryDto toSummary(WorkflowInstance w) {

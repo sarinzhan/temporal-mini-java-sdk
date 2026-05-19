@@ -1,8 +1,6 @@
 package com.beeline.workflow.spring.api;
 
-import java.util.UUID;
-
 public interface WorkflowClient {
 
-    UUID startWorkflow(String workflowType, Object input);
+    Long startWorkflow(String workflowType, Object input);
 }

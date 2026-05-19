@@ -1,11 +1,10 @@
 package com.beeline.workflow.web.dto;
 
 import java.time.Instant;
-import java.util.UUID;
 
 public record RunningTaskDto(
-        UUID taskId,
-        UUID workflowId,
+        Long taskId,
+        Long workflowId,
         Instant lockedAt,
         Instant lockedUntil
 ) {}
