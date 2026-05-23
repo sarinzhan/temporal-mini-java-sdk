@@ -3,7 +3,8 @@
     "allow": [
       "Bash(Get-ChildItem -Recurse \"C:\\\\Users\\\\Sarinzhan\\\\IdeaProjects\\\\temporal-mini-java-sdk\\\\frontend\\\\src\" -Directory)",
       "Bash(Select-Object FullName)",
-      "PowerShell(head *)"
+      "PowerShell(head *)",
+      "Bash(mvn -q -DskipTests compile)"
     ]
   }
 }

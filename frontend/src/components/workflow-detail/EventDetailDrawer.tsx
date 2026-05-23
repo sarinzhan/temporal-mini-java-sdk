@@ -47,14 +47,15 @@ function EventBody({ workflowId, event }: { workflowId: string; event: WorkflowE
       <KeyValue label="Event ID" value={String(event.id)} />
       <KeyValue label="Timestamp" value={formatTimestamp(event.createdAt)} />
       {event.activityName && <KeyValue label="Activity" value={event.activityName} mono />}
-      {event.attempt != null && <KeyValue label="Attempt" value={String(event.attempt)} />}
+      {event.seq != null && <KeyValue label="Seq" value={String(event.seq)} />}
+      {event.commandType && <KeyValue label="Command" value={event.commandType} />}
 
       <div>
         <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-fg-muted">Payload</div>
-        {event.eventType === 'ACTIVITY_FAILED' || event.eventType === 'ACTIVITY_RETRYING' || event.eventType === 'WORKFLOW_FAILED' ? (
-          <FailureView raw={event.data} />
+        {event.eventType === 'ACTIVITY_FAILED' || event.eventType === 'ACTIVITY_RETRY_SCHEDULED' || event.eventType === 'WORKFLOW_FAILED' ? (
+          <FailureView raw={event.payload} />
         ) : (
-          <JsonViewer value={event.data} empty="—" />
+          <JsonViewer value={event.payload} empty="—" />
         )}
       </div>
 

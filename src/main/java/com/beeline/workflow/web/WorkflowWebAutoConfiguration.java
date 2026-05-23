@@ -1,24 +1,30 @@
 package com.beeline.workflow.web;
 
+import com.beeline.workflow.engine.query.WorkflowQueryRuntime;
+import com.beeline.workflow.engine.update.UpdateRegistry;
 import com.beeline.workflow.engine.worker.WorkerLoop;
 import com.beeline.workflow.engine.worker.WorkerLoopImpl;
 import com.beeline.workflow.persistence.repository.ActivityOptionOverrideRepository;
-import com.beeline.workflow.persistence.repository.ActivityResultRepository;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.InstanceRegistryRepository;
 import com.beeline.workflow.persistence.repository.RetryRepository;
 import com.beeline.workflow.persistence.repository.SignalRepository;
 import com.beeline.workflow.persistence.repository.TaskRepository;
+import com.beeline.workflow.persistence.repository.UpdateRequestRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
+import com.beeline.workflow.registry.WorkflowRegistry;
 import com.beeline.workflow.spring.autoconfigure.WorkflowProperties;
 import com.beeline.workflow.web.controller.ActivityOverridesController;
 import com.beeline.workflow.web.controller.AdminExceptionHandler;
 import com.beeline.workflow.web.controller.ClusterController;
 import com.beeline.workflow.web.controller.WorkflowAdminController;
+import com.beeline.workflow.web.controller.WorkflowInvocationController;
 import com.beeline.workflow.web.controller.WorkflowsController;
 import com.beeline.workflow.web.service.ActivityOptionsOverrideService;
 import com.beeline.workflow.web.service.WorkflowAdminService;
+import com.beeline.workflow.web.service.WorkflowInvocationService;
 import com.beeline.workflow.web.service.WorkflowQueryService;
+import tools.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -47,9 +53,8 @@ public class WorkflowWebAutoConfiguration {
     @ConditionalOnMissingBean
     public WorkflowQueryService workflowQueryService(WorkflowRepository workflowRepository,
                                                      EventRepository eventRepository,
-                                                     ActivityResultRepository activityResultRepository,
                                                      RetryRepository retryRepository) {
-        return new WorkflowQueryService(workflowRepository, eventRepository, activityResultRepository, retryRepository);
+        return new WorkflowQueryService(workflowRepository, eventRepository, retryRepository);
     }
 
     @Bean
@@ -57,11 +62,10 @@ public class WorkflowWebAutoConfiguration {
     public WorkflowAdminService workflowAdminService(WorkflowRepository workflowRepository,
                                                      TaskRepository taskRepository,
                                                      EventRepository eventRepository,
-                                                     ActivityResultRepository activityResultRepository,
                                                      RetryRepository retryRepository,
                                                      SignalRepository signalRepository) {
         return new WorkflowAdminService(workflowRepository, taskRepository, eventRepository,
-                activityResultRepository, retryRepository, signalRepository);
+                retryRepository, signalRepository);
     }
 
     @Bean
@@ -92,5 +96,25 @@ public class WorkflowWebAutoConfiguration {
     @ConditionalOnMissingBean
     public AdminExceptionHandler adminExceptionHandler() {
         return new AdminExceptionHandler();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowInvocationService workflowInvocationService(WorkflowQueryRuntime queryRuntime,
+                                                               WorkflowRegistry workflowRegistry,
+                                                               WorkflowRepository workflowRepository,
+                                                               EventRepository eventRepository,
+                                                               TaskRepository taskRepository,
+                                                               UpdateRequestRepository updateRequestRepository,
+                                                               UpdateRegistry updateRegistry,
+                                                               ObjectMapper objectMapper) {
+        return new WorkflowInvocationService(queryRuntime, workflowRegistry, workflowRepository,
+                eventRepository, taskRepository, updateRequestRepository, updateRegistry, objectMapper);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowInvocationController workflowInvocationController(WorkflowInvocationService service) {
+        return new WorkflowInvocationController(service);
     }
 }

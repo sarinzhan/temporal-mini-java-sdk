@@ -6,13 +6,14 @@ import com.beeline.workflow.core.config.RetryPolicy;
 import com.beeline.workflow.core.exception.ActivityFailureException;
 import com.beeline.workflow.core.exception.ActivityTimeoutException;
 import com.beeline.workflow.core.exception.NonRetryableException;
-import com.beeline.workflow.core.model.ActivityResult;
 import com.beeline.workflow.core.model.Event;
 import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.core.model.RetryRecord;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
 import com.beeline.workflow.engine.context.WorkflowContextImpl;
-import com.beeline.workflow.persistence.repository.ActivityResultRepository;
+import com.beeline.workflow.engine.replay.CommandType;
+import com.beeline.workflow.engine.replay.HistoryCursor;
+import com.beeline.workflow.engine.replay.QueryReplayBlockedException;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.RetryRepository;
 import org.slf4j.Logger;
@@ -20,12 +21,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JavaType;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.lang.reflect.Type;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -34,11 +37,21 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
+/**
+ * Event-sourced activity executor. On each invocation:
+ *   1. Take the next seq from the workflow's {@link HistoryCursor}.
+ *   2. If history contains ACTIVITY_COMPLETED / ACTIVITY_FAILED for that seq, return / re-throw it
+ *      without running the activity again (replay).
+ *   3. Otherwise, write ACTIVITY_SCHEDULED (if not already in history), execute the activity,
+ *      and write ACTIVITY_COMPLETED on success or ACTIVITY_RETRY_SCHEDULED / ACTIVITY_FAILED on failure.
+ */
 public class ActivityExecutorImpl implements ActivityExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(ActivityExecutorImpl.class);
 
-    private final ActivityResultRepository activityResultRepository;
+    private static final Set<EventType> ACTIVITY_TERMINAL = Set.of(
+            EventType.ACTIVITY_COMPLETED, EventType.ACTIVITY_FAILED);
+
     private final EventRepository eventRepository;
     private final RetryRepository retryRepository;
     private final ObjectMapper objectMapper;
@@ -46,28 +59,25 @@ public class ActivityExecutorImpl implements ActivityExecutor {
     private final ExecutorService activityThreadPool;
     private final java.util.function.BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver;
 
-    public ActivityExecutorImpl(ActivityResultRepository activityResultRepository,
-                                EventRepository eventRepository,
+    public ActivityExecutorImpl(EventRepository eventRepository,
                                 RetryRepository retryRepository,
                                 ObjectMapper objectMapper,
                                 PlatformTransactionManager transactionManager) {
-        this(activityResultRepository, eventRepository, retryRepository, objectMapper, transactionManager, (name, opts) -> opts);
+        this(eventRepository, retryRepository, objectMapper, transactionManager, (name, opts) -> opts);
     }
 
-    public ActivityExecutorImpl(ActivityResultRepository activityResultRepository,
-                                EventRepository eventRepository,
+    public ActivityExecutorImpl(EventRepository eventRepository,
                                 RetryRepository retryRepository,
                                 ObjectMapper objectMapper,
                                 PlatformTransactionManager transactionManager,
                                 java.util.function.BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver) {
-        this.activityResultRepository = activityResultRepository;
         this.eventRepository = eventRepository;
         this.retryRepository = retryRepository;
         this.objectMapper = objectMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.optionsResolver = optionsResolver;
         this.activityThreadPool = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "wf-activity-" + System.nanoTime());
+            Thread t = new Thread(r, "wf-activity-timeout-" + System.nanoTime());
             t.setDaemon(true);
             return t;
         });
@@ -80,38 +90,45 @@ public class ActivityExecutorImpl implements ActivityExecutor {
                           Supplier<Object> invocation) {
         WorkflowContext ctx = WorkflowContextHolder.require();
         Long workflowId = ctx.getWorkflowId();
+        HistoryCursor cursor = ctx.getHistoryCursor();
+        if (cursor == null) {
+            throw new IllegalStateException("HistoryCursor missing — workflow context not initialized for replay");
+        }
         options = optionsResolver.apply(activityName, options);
 
-        Long wfId = workflowId;
-        String actName = activityName;
-        Optional<ActivityResult> existing = transactionTemplate.execute(s ->
-                activityResultRepository.findByWorkflowIdAndActivityName(wfId, actName));
+        int seq = cursor.nextSeq();
 
-        if (existing.isPresent() && "COMPLETED".equals(existing.get().getStatus())) {
-            log.debug("[{}/{}] activity replay-cached", workflowId, activityName);
-            Type effective = returnType;
-            if (effective == null || effective == void.class || effective == Void.class) {
-                String storedType = existing.get().getResultType();
-                if (storedType != null) {
-                    try {
-                        effective = Class.forName(storedType);
-                    } catch (ClassNotFoundException e) {
-                        throw new IllegalStateException(
-                                "Cached result type not on classpath: " + storedType +
-                                " (workflow=" + workflowId + ", activity=" + activityName + ")", e);
-                    }
-                }
+        Optional<Event> terminal = cursor.findCompletion(seq, CommandType.ACTIVITY, ACTIVITY_TERMINAL);
+        if (terminal.isPresent()) {
+            Event e = terminal.get();
+            if (e.getEventType() == EventType.ACTIVITY_COMPLETED) {
+                log.debug("[{}/{}] activity replay-cached seq={}", workflowId, activityName, seq);
+                return deserializeResult(e.getPayload(), returnType);
             }
-            return deserialize(existing.get().getResult(), effective);
+            // ACTIVITY_FAILED in history → check if a manual ACTIVITY_RETRY_SCHEDULED came after (admin override).
+            boolean forceRetry = cursor.findBySeqAndType(seq, EventType.ACTIVITY_RETRY_SCHEDULED).isPresent()
+                    && hasManualMarker(cursor, seq);
+            if (!forceRetry) {
+                String reason = e.getPayload() != null ? e.getPayload() : "activity failed";
+                throw new ActivityFailureException(activityName, attemptFromHistory(cursor, seq),
+                        reason, new RuntimeException(reason));
+            }
+            log.info("[{}/{}] manual force-retry — re-executing seq={}", workflowId, activityName, seq);
         }
 
-        int attempt = existing.map(r -> r.getAttempt() + 1).orElse(1);
-
-        if (options.getIdempotencyKey() != null && existing.isEmpty()) {
-            log.debug("[{}/{}] idempotency key set: {}", workflowId, activityName, options.getIdempotencyKey());
+        if (cursor.isQueryMode()) {
+            throw new QueryReplayBlockedException(
+                    "activity " + activityName + " not yet recorded in history (seq=" + seq + ")");
         }
 
-        saveEvent(workflowId, EventType.ACTIVITY_STARTED, activityName, attempt, null);
+        int attempt = attemptFromHistory(cursor, seq) + 1;
+
+        if (cursor.findBySeqAndType(seq, EventType.ACTIVITY_SCHEDULED).isEmpty()) {
+            saveEvent(workflowId, EventType.ACTIVITY_SCHEDULED, seq, activityName,
+                    "{\"attempt\":" + attempt + "}");
+        }
+        saveEvent(workflowId, EventType.ACTIVITY_STARTED, seq, activityName,
+                "{\"attempt\":" + attempt + "}");
 
         Object result;
         Duration timeout = options.getStartToCloseTimeout();
@@ -123,61 +140,54 @@ public class ActivityExecutorImpl implements ActivityExecutor {
                 result = future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             }
         } catch (TimeoutException te) {
-            return failOrRetry(workflowId, activityName, attempt, options,
-                    new ActivityTimeoutException(activityName, timeout), existing.orElse(null));
+            return failOrRetry(workflowId, activityName, seq, attempt, options,
+                    new ActivityTimeoutException(activityName, timeout));
         } catch (ExecutionException ee) {
             Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
-            return failOrRetry(workflowId, activityName, attempt, options, cause, existing.orElse(null));
+            return failOrRetry(workflowId, activityName, seq, attempt, options, cause);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            return failOrRetry(workflowId, activityName, attempt, options, ie, existing.orElse(null));
+            return failOrRetry(workflowId, activityName, seq, attempt, options, ie);
         } catch (RuntimeException re) {
-            return failOrRetry(workflowId, activityName, attempt, options, re, existing.orElse(null));
+            return failOrRetry(workflowId, activityName, seq, attempt, options, re);
         }
 
-        final Object finalResult = result;
-        final int finalAttempt = attempt;
-        transactionTemplate.executeWithoutResult(s -> {
-            ActivityResult ar = existing.orElseGet(ActivityResult::new);
-            ar.setWorkflowId(wfId);
-            ar.setActivityName(actName);
-            ar.setStatus("COMPLETED");
-            ar.setResult(serialize(finalResult));
-            ar.setResultType(finalResult != null ? finalResult.getClass().getName() : null);
-            ar.setError(null);
-            ar.setAttempt(finalAttempt);
-            if (ar.getCreatedAt() == null) ar.setCreatedAt(Instant.now());
-            activityResultRepository.save(ar);
-        });
-
-        saveEvent(workflowId, EventType.ACTIVITY_COMPLETED, activityName, attempt, serialize(result));
-        log.info("[{}/{}] activity COMPLETED attempt={}", workflowId, activityName, attempt);
+        String payload = buildCompletedPayload(result, attempt);
+        saveEvent(workflowId, EventType.ACTIVITY_COMPLETED, seq, activityName, payload);
+        log.info("[{}/{}] activity COMPLETED seq={} attempt={}", workflowId, activityName, seq, attempt);
         return result;
+    }
+
+    private boolean hasManualMarker(HistoryCursor cursor, int seq) {
+        return cursor.findBySeqAndType(seq, EventType.ACTIVITY_RETRY_SCHEDULED)
+                .map(Event::getPayload)
+                .filter(p -> p != null && p.contains("\"manual\":true"))
+                .isPresent();
+    }
+
+    private int attemptFromHistory(HistoryCursor cursor, int seq) {
+        Optional<Event> sched = cursor.findBySeqAndType(seq, EventType.ACTIVITY_SCHEDULED);
+        Optional<Event> retry = cursor.findBySeqAndType(seq, EventType.ACTIVITY_RETRY_SCHEDULED);
+        int n = 0;
+        if (sched.isPresent()) n = extractInt(sched.get().getPayload(), "attempt", 1);
+        if (retry.isPresent()) n = Math.max(n, extractInt(retry.get().getPayload(), "attempt", n));
+        return n;
     }
 
     private Object failOrRetry(Long workflowId,
                                String activityName,
+                               int seq,
                                int attempt,
                                ActivityOptions options,
-                               Throwable cause,
-                               ActivityResult existing) {
+                               Throwable cause) {
         RetryPolicy policy = options.getRetryPolicy() != null ? options.getRetryPolicy() : RetryPolicy.defaultPolicy();
         boolean noRetry = cause instanceof NonRetryableException || policy.isNoRetry(cause);
         boolean exhausted = attempt >= policy.getMaxAttempts();
         boolean willRetry = !noRetry && !exhausted;
         Instant fireAt = willRetry ? Instant.now().plus(policy.nextDelay(attempt)) : null;
 
-        transactionTemplate.executeWithoutResult(s -> {
-            ActivityResult ar = existing != null ? existing : new ActivityResult();
-            ar.setWorkflowId(workflowId);
-            ar.setActivityName(activityName);
-            ar.setAttempt(attempt);
-            ar.setError(safeMessage(cause));
-            ar.setStatus(willRetry ? "FAILED" : "DEAD");
-            if (ar.getCreatedAt() == null) ar.setCreatedAt(Instant.now());
-            activityResultRepository.save(ar);
-
-            if (willRetry) {
+        if (willRetry) {
+            transactionTemplate.executeWithoutResult(s -> {
                 RetryRecord r = new RetryRecord();
                 r.setWorkflowId(workflowId);
                 r.setActivityName(activityName);
@@ -191,61 +201,96 @@ public class ActivityExecutorImpl implements ActivityExecutor {
                     r.setTaskId(impl.getCurrentTaskId());
                 }
                 retryRepository.save(r);
-            }
-        });
-
-        if (willRetry) {
-            saveEvent(workflowId, EventType.ACTIVITY_RETRYING, activityName, attempt, safeMessage(cause));
-            log.warn("[{}/{}] activity FAILED attempt={} — retrying at {}", workflowId, activityName, attempt, fireAt);
+            });
+            String payload = "{\"attempt\":" + attempt + ",\"fireAt\":\"" + fireAt
+                    + "\",\"reason\":\"" + escapeJson(safeMessage(cause)) + "\"}";
+            saveEvent(workflowId, EventType.ACTIVITY_RETRY_SCHEDULED, seq, activityName, payload);
+            log.warn("[{}/{}] activity FAILED seq={} attempt={} — retrying at {}",
+                    workflowId, activityName, seq, attempt, fireAt);
         } else {
-            saveEvent(workflowId, EventType.ACTIVITY_FAILED, activityName, attempt, safeMessage(cause));
-            log.error("[{}/{}] activity FAILED attempt={} — {}",
-                    workflowId, activityName, attempt, noRetry ? "non-retryable" : "attempts exhausted");
+            String payload = "{\"attempt\":" + attempt
+                    + ",\"reason\":\"" + escapeJson(safeMessage(cause)) + "\""
+                    + ",\"terminal\":true}";
+            saveEvent(workflowId, EventType.ACTIVITY_FAILED, seq, activityName, payload);
+            log.error("[{}/{}] activity FAILED seq={} attempt={} — {}",
+                    workflowId, activityName, seq, attempt, noRetry ? "non-retryable" : "attempts exhausted");
         }
 
         throw new ActivityFailureException(activityName, attempt, safeMessage(cause), cause);
     }
 
-    private void saveEvent(Long workflowId, EventType type, String activityName, Integer attempt, String data) {
+    private void saveEvent(Long workflowId, EventType type, int seq, String activityName, String payload) {
         transactionTemplate.executeWithoutResult(s -> {
             Event e = new Event();
             e.setWorkflowId(workflowId);
             e.setEventType(type);
+            e.setCommandType(CommandType.ACTIVITY.name());
+            e.setSeq(seq);
             e.setActivityName(activityName);
-            e.setAttempt(attempt);
-            e.setData(data);
+            e.setPayload(payload);
             eventRepository.save(e);
         });
     }
 
-    private String serialize(Object value) {
-        if (value == null) return null;
+    private String buildCompletedPayload(Object result, int attempt) {
         try {
-            return objectMapper.writeValueAsString(value);
+            String resultJson = result == null ? "null" : objectMapper.writeValueAsString(result);
+            String runtimeType = result != null ? result.getClass().getName() : null;
+            return "{\"attempt\":" + attempt
+                    + ",\"result\":" + resultJson
+                    + (runtimeType != null ? ",\"resultType\":\"" + runtimeType + "\"" : "")
+                    + "}";
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize activity result", e);
         }
     }
 
-    private Object deserialize(String json, Type targetType) {
-        if (json == null) return null;
-        if (targetType == void.class || targetType == Void.class) return null;
-        if (targetType == null) {
-            try {
-                return objectMapper.readValue(json, Object.class);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to deserialize cached activity result", e);
-            }
-        }
+    private Object deserializeResult(String payload, Type returnType) {
+        if (payload == null) return null;
         try {
-            JavaType jt = objectMapper.constructType(targetType);
-            return objectMapper.readValue(json, jt);
+            JsonNode node = objectMapper.readTree(payload);
+            JsonNode resultNode = node.get("result");
+            if (resultNode == null || resultNode.isNull()) return null;
+            Type effective = returnType;
+            if (effective == null || effective == void.class || effective == Void.class) {
+                JsonNode typeNode = node.get("resultType");
+                if (typeNode != null && !typeNode.isNull()) {
+                    try {
+                        effective = Class.forName(typeNode.asString());
+                    } catch (ClassNotFoundException cnf) {
+                        throw new IllegalStateException(
+                                "Recorded activity result type not on classpath: " + typeNode.asString(), cnf);
+                    }
+                } else {
+                    effective = Object.class;
+                }
+            }
+            JavaType jt = objectMapper.constructType(effective);
+            return objectMapper.readValue(objectMapper.writeValueAsString(resultNode), jt);
+        } catch (RuntimeException re) {
+            throw re;
         } catch (Exception e) {
             throw new RuntimeException("Failed to deserialize cached activity result", e);
         }
     }
 
+    private int extractInt(String payload, String field, int defaultValue) {
+        if (payload == null) return defaultValue;
+        try {
+            JsonNode node = objectMapper.readTree(payload);
+            JsonNode v = node.get(field);
+            return v != null && v.isNumber() ? v.asInt() : defaultValue;
+        } catch (Exception e) {
+            return defaultValue;
+        }
+    }
+
     private static String safeMessage(Throwable t) {
         return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+    }
+
+    private static String escapeJson(String v) {
+        if (v == null) return "";
+        return v.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

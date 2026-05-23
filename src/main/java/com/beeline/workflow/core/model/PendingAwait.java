@@ -2,24 +2,22 @@ package com.beeline.workflow.core.model;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import lombok.Getter;
 import lombok.Setter;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 
 @Getter
 @Setter
 @Entity
-@Table(name = "events", schema = "wflow")
-public class Event {
+@Table(name = "pending_awaits", schema = "wflow",
+        uniqueConstraints = @UniqueConstraint(columnNames = {"workflow_id", "seq"}))
+public class PendingAwait {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -28,22 +26,12 @@ public class Event {
     @Column(name = "workflow_id", nullable = false)
     private Long workflowId;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "event_type", nullable = false)
-    private EventType eventType;
-
-    @Column(name = "command_type")
-    private String commandType;
-
-    @Column(name = "seq")
+    @Column(nullable = false)
     private Integer seq;
 
-    @Column(name = "activity_name")
-    private String activityName;
-
-    @Column(name = "payload", columnDefinition = "jsonb")
-    @JdbcTypeCode(SqlTypes.JSON)
-    private String payload;
+    /** Null means "no timeout — wait for signal only". */
+    @Column
+    private Instant deadline;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();

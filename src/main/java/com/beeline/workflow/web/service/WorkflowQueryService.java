@@ -1,11 +1,10 @@
 package com.beeline.workflow.web.service;
 
-import com.beeline.workflow.core.model.ActivityResult;
 import com.beeline.workflow.core.model.Event;
+import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.core.model.RetryRecord;
 import com.beeline.workflow.core.model.WorkflowInstance;
 import com.beeline.workflow.core.model.WorkflowStatus;
-import com.beeline.workflow.persistence.repository.ActivityResultRepository;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.RetryRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
@@ -33,16 +32,13 @@ public class WorkflowQueryService {
 
     private final WorkflowRepository workflowRepository;
     private final EventRepository eventRepository;
-    private final ActivityResultRepository activityResultRepository;
     private final RetryRepository retryRepository;
 
     public WorkflowQueryService(WorkflowRepository workflowRepository,
                                 EventRepository eventRepository,
-                                ActivityResultRepository activityResultRepository,
                                 RetryRepository retryRepository) {
         this.workflowRepository = workflowRepository;
         this.eventRepository = eventRepository;
-        this.activityResultRepository = activityResultRepository;
         this.retryRepository = retryRepository;
     }
 
@@ -115,50 +111,63 @@ public class WorkflowQueryService {
     }
 
     public List<EventDto> events(Long workflowId) {
-        return eventRepository.findByWorkflowIdOrderByCreatedAtAsc(workflowId).stream()
+        return eventRepository.findByWorkflowIdOrderByIdAsc(workflowId).stream()
                 .map(WorkflowQueryService::toEvent)
                 .toList();
     }
 
+    /**
+     * Pending = activities that were SCHEDULED but never COMPLETED/FAILED in history,
+     * plus open retries from the retry index. Source of truth is the event log.
+     */
     public List<PendingActivityDto> pendingActivities(Long workflowId) {
-        List<ActivityResult> results = activityResultRepository.findByWorkflowIdOrderByCreatedAtAsc(workflowId);
-        Map<String, ActivityResult> byName = new HashMap<>();
-        for (ActivityResult r : results) {
-            byName.merge(r.getActivityName(), r, (a, b) -> a.getCreatedAt().isAfter(b.getCreatedAt()) ? a : b);
-        }
-        List<RetryRecord> retries = retryRepository.findByWorkflowIdAndProcessedFalseOrderByFireAtAsc(workflowId);
+        List<Event> events = eventRepository.findByWorkflowIdOrderByIdAsc(workflowId);
 
-        List<PendingActivityDto> out = new java.util.ArrayList<>();
-        // Pending = either active retry record, or last result is in non-terminal state.
-        for (RetryRecord r : retries) {
-            ActivityResult last = byName.get(r.getActivityName());
-            out.add(new PendingActivityDto(
-                    r.getActivityName(),
-                    r.getAttempt(),
-                    r.getMaxAttempts(),
-                    r.getFireAt(),
-                    last != null ? last.getError() : r.getReason(),
-                    last != null ? last.getStatus() : "RETRY_SCHEDULED"
-            ));
-        }
-        // Also surface activities that are FAILED/DEAD without a pending retry — they are "stuck".
-        for (ActivityResult r : results) {
-            if ("DEAD".equals(r.getStatus())) {
-                boolean hasRetry = retries.stream().anyMatch(rr -> rr.getActivityName().equals(r.getActivityName()));
-                if (!hasRetry) {
-                    out.add(new PendingActivityDto(
-                            r.getActivityName(),
-                            r.getAttempt(),
-                            r.getAttempt(),
-                            null,
-                            r.getError(),
-                            "DEAD"
-                    ));
-                }
+        // last-seen activity state per name, keyed on the latest event
+        Map<String, ActivityState> latest = new HashMap<>();
+        for (Event e : events) {
+            if (e.getActivityName() == null) continue;
+            switch (e.getEventType()) {
+                case ACTIVITY_SCHEDULED -> latest.merge(e.getActivityName(),
+                        new ActivityState("SCHEDULED", 1, null, null),
+                        (prev, neu) -> new ActivityState("SCHEDULED", prev.attempt, prev.lastError, prev.nextFireAt));
+                case ACTIVITY_STARTED -> latest.computeIfPresent(e.getActivityName(),
+                        (k, prev) -> new ActivityState("STARTED", prev.attempt, prev.lastError, prev.nextFireAt));
+                case ACTIVITY_COMPLETED, ACTIVITY_FAILED -> latest.remove(e.getActivityName());
+                case ACTIVITY_RETRY_SCHEDULED -> latest.compute(e.getActivityName(),
+                        (k, prev) -> new ActivityState("RETRY_SCHEDULED",
+                                (prev != null ? prev.attempt + 1 : 1),
+                                e.getPayload(), null));
+                default -> { /* ignore */ }
             }
+        }
+
+        List<RetryRecord> openRetries = retryRepository.findByWorkflowIdAndProcessedFalseOrderByFireAtAsc(workflowId);
+        Map<String, RetryRecord> retryByName = new HashMap<>();
+        for (RetryRecord r : openRetries) {
+            retryByName.put(r.getActivityName(), r);
+        }
+
+        List<PendingActivityDto> out = new ArrayList<>();
+        for (var entry : latest.entrySet()) {
+            ActivityState st = entry.getValue();
+            RetryRecord retry = retryByName.get(entry.getKey());
+            int maxAttempts = retry != null ? retry.getMaxAttempts() : st.attempt;
+            Instant nextFireAt = retry != null ? retry.getFireAt() : st.nextFireAt;
+            String lastError = retry != null ? retry.getReason() : st.lastError;
+            out.add(new PendingActivityDto(
+                    entry.getKey(),
+                    retry != null ? retry.getAttempt() : st.attempt,
+                    maxAttempts,
+                    nextFireAt,
+                    lastError,
+                    st.status
+            ));
         }
         return out;
     }
+
+    private record ActivityState(String status, int attempt, String lastError, Instant nextFireAt) {}
 
     private Sort parseSort(String sort) {
         if (sort == null || sort.isBlank()) return Sort.by(Sort.Direction.DESC, "createdAt");
@@ -186,26 +195,32 @@ public class WorkflowQueryService {
     }
 
     private static WorkflowSummaryDto toSummary(WorkflowInstance w) {
-        Long dur = w.getCompletedAt() != null
-                ? Duration.between(w.getCreatedAt(), w.getCompletedAt()).toMillis()
-                : null;
         return new WorkflowSummaryDto(
                 w.getId(), w.getWorkflowType(), w.getStatus(),
-                w.getCreatedAt(), w.getCompletedAt(), dur);
+                w.getCreatedAt(), w.getCompletedAt(), computeDuration(w));
     }
 
     private static WorkflowDetailDto toDetail(WorkflowInstance w) {
-        Long dur = w.getCompletedAt() != null
-                ? Duration.between(w.getCreatedAt(), w.getCompletedAt()).toMillis()
-                : null;
         return new WorkflowDetailDto(
                 w.getId(), w.getWorkflowType(), w.getStatus(),
-                w.getCreatedAt(), w.getCompletedAt(), dur,
+                w.getCreatedAt(), w.getCompletedAt(), computeDuration(w),
                 w.getInput(), w.getResult(), w.getError());
     }
 
+    private static Long computeDuration(WorkflowInstance w) {
+        if (w.getCreatedAt() == null) return null;
+        Instant end = w.getCompletedAt() != null ? w.getCompletedAt() : Instant.now();
+        return Duration.between(w.getCreatedAt(), end).toMillis();
+    }
+
     private static EventDto toEvent(Event e) {
-        return new EventDto(e.getId(), e.getEventType(), e.getActivityName(),
-                e.getAttempt(), e.getData(), e.getCreatedAt());
+        return new EventDto(
+                e.getId(),
+                e.getEventType(),
+                e.getCommandType(),
+                e.getSeq(),
+                e.getActivityName(),
+                e.getPayload(),
+                e.getCreatedAt());
     }
 }

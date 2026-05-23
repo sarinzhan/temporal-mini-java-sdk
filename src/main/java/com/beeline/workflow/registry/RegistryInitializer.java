@@ -1,6 +1,8 @@
 package com.beeline.workflow.registry;
 
 import com.beeline.workflow.core.annotation.Activity;
+import com.beeline.workflow.core.annotation.QueryMethod;
+import com.beeline.workflow.core.annotation.UpdateMethod;
 import com.beeline.workflow.core.annotation.WorkflowComponent;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -9,6 +11,7 @@ import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.context.ApplicationContext;
 import org.springframework.util.ClassUtils;
 
+import java.lang.reflect.Method;
 import java.util.Set;
 
 public class RegistryInitializer {
@@ -46,9 +49,29 @@ public class RegistryInitializer {
                         ? beanClass.getSimpleName() : ann.value();
                 workflowRegistry.register(type, bean);
                 log.info("Registered workflow: {} -> {}", type, beanClass.getName());
+
+                scanQueryAndUpdateMethods(type, beanClass);
             }
         }
         log.info("RegistryInitializer: {} activities, {} workflows registered",
                 activityRegistry.size(), workflowRegistry.size());
+    }
+
+    private void scanQueryAndUpdateMethods(String workflowType, Class<?> beanClass) {
+        for (Method m : beanClass.getDeclaredMethods()) {
+            if (m.isSynthetic() || m.isBridge()) continue;
+            QueryMethod query = m.getAnnotation(QueryMethod.class);
+            if (query != null) {
+                String name = query.name().isBlank() ? m.getName() : query.name();
+                workflowRegistry.registerQuery(workflowType, name, m);
+                log.info("Registered query: {}::{} -> {}", workflowType, name, m.getName());
+            }
+            UpdateMethod update = m.getAnnotation(UpdateMethod.class);
+            if (update != null) {
+                String name = update.name().isBlank() ? m.getName() : update.name();
+                workflowRegistry.registerUpdate(workflowType, name, m);
+                log.info("Registered update: {}::{} -> {}", workflowType, name, m.getName());
+            }
+        }
     }
 }

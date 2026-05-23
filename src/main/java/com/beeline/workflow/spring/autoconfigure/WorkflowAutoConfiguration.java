@@ -4,20 +4,24 @@ import com.beeline.workflow.core.api.Workflow;
 import com.beeline.workflow.engine.executor.ActivityExecutor;
 import com.beeline.workflow.engine.executor.ActivityExecutorImpl;
 import com.beeline.workflow.engine.executor.WorkflowExecutor;
-import com.beeline.workflow.engine.scheduler.RetryScheduler;
-import com.beeline.workflow.engine.scheduler.RetrySchedulerImpl;
+import com.beeline.workflow.engine.query.WorkflowQueryRuntime;
 import com.beeline.workflow.engine.scheduler.TimeoutWatcher;
 import com.beeline.workflow.engine.scheduler.TimeoutWatcherImpl;
+import com.beeline.workflow.engine.scheduler.WakeupScheduler;
+import com.beeline.workflow.engine.scheduler.WakeupSchedulerImpl;
+import com.beeline.workflow.engine.update.UpdateRegistry;
 import com.beeline.workflow.engine.cluster.InstanceRegistryService;
 import com.beeline.workflow.engine.signal.SignalBus;
 import com.beeline.workflow.engine.signal.SignalBusImpl;
 import com.beeline.workflow.engine.stub.ActivityStubFactory;
 import com.beeline.workflow.engine.worker.WorkerLoop;
 import com.beeline.workflow.engine.worker.WorkerLoopImpl;
-import com.beeline.workflow.persistence.repository.ActivityResultRepository;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.InstanceRegistryRepository;
+import com.beeline.workflow.persistence.repository.PendingAwaitRepository;
+import com.beeline.workflow.persistence.repository.PendingTimerRepository;
 import com.beeline.workflow.persistence.repository.RetryRepository;
+import com.beeline.workflow.persistence.repository.UpdateRequestRepository;
 import com.beeline.workflow.persistence.repository.SignalRepository;
 import com.beeline.workflow.persistence.repository.TaskRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
@@ -73,18 +77,17 @@ public class WorkflowAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public ActivityExecutor activityExecutor(ActivityResultRepository activityResultRepository,
-                                             EventRepository eventRepository,
+    public ActivityExecutor activityExecutor(EventRepository eventRepository,
                                              RetryRepository retryRepository,
                                              ObjectMapper objectMapper,
                                              PlatformTransactionManager transactionManager,
                                              org.springframework.beans.factory.ObjectProvider<com.beeline.workflow.web.service.ActivityOptionsOverrideService> overrideProvider) {
         com.beeline.workflow.web.service.ActivityOptionsOverrideService overrides = overrideProvider.getIfAvailable();
         if (overrides == null) {
-            return new ActivityExecutorImpl(activityResultRepository, eventRepository, retryRepository,
+            return new ActivityExecutorImpl(eventRepository, retryRepository,
                     objectMapper, transactionManager);
         }
-        return new ActivityExecutorImpl(activityResultRepository, eventRepository, retryRepository,
+        return new ActivityExecutorImpl(eventRepository, retryRepository,
                 objectMapper, transactionManager, overrides::resolve);
     }
 
@@ -102,10 +105,34 @@ public class WorkflowAutoConfiguration {
                                              ActivityExecutor activityExecutor,
                                              WorkflowRepository workflowRepository,
                                              EventRepository eventRepository,
+                                             PendingTimerRepository pendingTimerRepository,
+                                             PendingAwaitRepository pendingAwaitRepository,
+                                             UpdateRequestRepository updateRequestRepository,
+                                             UpdateRegistry updateRegistry,
                                              ObjectMapper objectMapper,
                                              PlatformTransactionManager transactionManager) {
         return new WorkflowExecutor(workflowRegistry, activityRegistry, activityExecutor,
-                workflowRepository, eventRepository, objectMapper, transactionManager);
+                workflowRepository, eventRepository, pendingTimerRepository, pendingAwaitRepository,
+                updateRequestRepository, updateRegistry, objectMapper, transactionManager);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public UpdateRegistry updateRegistry() {
+        return new UpdateRegistry();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowQueryRuntime workflowQueryRuntime(ApplicationContext applicationContext,
+                                                     WorkflowRepository workflowRepository,
+                                                     EventRepository eventRepository,
+                                                     WorkflowRegistry workflowRegistry,
+                                                     ActivityRegistry activityRegistry,
+                                                     ActivityExecutor activityExecutor,
+                                                     ObjectMapper objectMapper) {
+        return new WorkflowQueryRuntime(applicationContext, workflowRepository, eventRepository,
+                workflowRegistry, activityRegistry, activityExecutor, objectMapper);
     }
 
     @Bean
@@ -119,10 +146,15 @@ public class WorkflowAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public SignalBus signalBus(SignalRepository signalRepository,
+                               EventRepository eventRepository,
+                               TaskRepository taskRepository,
+                               PendingAwaitRepository pendingAwaitRepository,
                                ObjectMapper objectMapper,
                                PlatformTransactionManager transactionManager) {
-        SignalBusImpl bus = new SignalBusImpl(signalRepository, objectMapper, transactionManager);
+        SignalBusImpl bus = new SignalBusImpl(signalRepository, eventRepository, taskRepository,
+                pendingAwaitRepository, objectMapper, transactionManager);
         Workflow.installSignalBus(bus);
+        Workflow.installObjectMapper(objectMapper);
         return bus;
     }
 
@@ -137,8 +169,13 @@ public class WorkflowAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public RetryScheduler retryScheduler(RetryRepository retryRepository, TaskRepository taskRepository) {
-        return new RetrySchedulerImpl(retryRepository, taskRepository);
+    public WakeupScheduler wakeupScheduler(RetryRepository retryRepository,
+                                           PendingTimerRepository pendingTimerRepository,
+                                           PendingAwaitRepository pendingAwaitRepository,
+                                           EventRepository eventRepository,
+                                           TaskRepository taskRepository) {
+        return new WakeupSchedulerImpl(retryRepository, pendingTimerRepository, pendingAwaitRepository,
+                eventRepository, taskRepository);
     }
 
     @Bean
@@ -151,9 +188,10 @@ public class WorkflowAutoConfiguration {
     @ConditionalOnMissingBean
     public WorkflowClient workflowClient1(WorkflowRepository workflowRepository,
                                          TaskRepository taskRepository,
+                                         EventRepository eventRepository,
                                          WorkflowRegistry workflowRegistry,
                                          ObjectMapper objectMapper) {
-        return new WorkflowClientImpl(workflowRepository, taskRepository, workflowRegistry, objectMapper);
+        return new WorkflowClientImpl(workflowRepository, taskRepository, eventRepository, workflowRegistry, objectMapper);
     }
 
     @Bean

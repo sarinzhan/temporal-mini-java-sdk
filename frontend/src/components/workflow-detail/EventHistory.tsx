@@ -42,10 +42,10 @@ export function EventHistory({ workflowId, events }: { workflowId: string; event
                 </td>
                 <td className="px-3 py-2 text-xs text-fg-muted">
                   {ev.activityName && <span className="font-mono text-fg">{ev.activityName}</span>}
-                  {ev.attempt != null && <span className="ml-2">attempt {ev.attempt}</span>}
-                  {ev.data && (
+                  {ev.seq != null && <span className="ml-2">seq {ev.seq}</span>}
+                  {ev.payload && (
                     <span className="ml-2 truncate">{(() => {
-                      const s = ev.data;
+                      const s = ev.payload;
                       return s.length > 80 ? `${s.slice(0, 80)}…` : s;
                     })()}</span>
                   )}

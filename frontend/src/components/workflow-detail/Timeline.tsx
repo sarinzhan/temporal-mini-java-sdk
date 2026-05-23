@@ -13,6 +13,17 @@ interface Bar {
   attempt: number;
 }
 
+function parsePayloadInt(payload: string | null, field: string): number | null {
+  if (!payload) return null;
+  try {
+    const obj = JSON.parse(payload);
+    const v = obj?.[field];
+    return typeof v === 'number' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 export function Timeline({ events }: { events: WorkflowEvent[] }) {
   const [zoom, setZoom] = useState(1);
 
@@ -107,11 +118,12 @@ function buildBars(events: WorkflowEvent[]): { bars: Bar[]; t0: number; t1: numb
     t1 = Math.max(t1, ts);
 
     if (!e.activityName) continue;
-    const key = `${e.activityName}#${e.attempt ?? 0}`;
+    const attempt = parsePayloadInt(e.payload, 'attempt') ?? 0;
+    const key = `${e.activityName}#${e.seq ?? 0}#${attempt}`;
 
     if (e.eventType === 'ACTIVITY_STARTED') {
-      starts.set(key, { start: ts, attempt: e.attempt ?? 0 });
-    } else if (e.eventType === 'ACTIVITY_COMPLETED' || e.eventType === 'ACTIVITY_FAILED' || e.eventType === 'ACTIVITY_RETRYING') {
+      starts.set(key, { start: ts, attempt });
+    } else if (e.eventType === 'ACTIVITY_COMPLETED' || e.eventType === 'ACTIVITY_FAILED' || e.eventType === 'ACTIVITY_RETRY_SCHEDULED') {
       const s = starts.get(key);
       if (s) {
         bars.push({
@@ -120,7 +132,7 @@ function buildBars(events: WorkflowEvent[]): { bars: Bar[]; t0: number; t1: numb
           end: ts,
           attempt: s.attempt,
           status: e.eventType === 'ACTIVITY_COMPLETED' ? 'completed'
-                : e.eventType === 'ACTIVITY_RETRYING' ? 'retrying'
+                : e.eventType === 'ACTIVITY_RETRY_SCHEDULED' ? 'retrying'
                 : 'failed',
         });
         starts.delete(key);

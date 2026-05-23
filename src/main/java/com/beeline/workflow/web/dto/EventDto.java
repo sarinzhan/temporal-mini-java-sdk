@@ -7,8 +7,9 @@ import java.time.Instant;
 public record EventDto(
         Long id,
         EventType eventType,
+        String commandType,
+        Integer seq,
         String activityName,
-        Integer attempt,
-        String data,
+        String payload,
         Instant createdAt
 ) {}

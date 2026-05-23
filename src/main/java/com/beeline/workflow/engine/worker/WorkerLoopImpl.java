@@ -127,7 +127,7 @@ private List<Task> claimBatch(int batchSize) {
             Task fresh = taskRepository.findById(taskId).orElse(null);
             if (fresh == null) return;
             switch (outcome) {
-                case COMPLETED, RETRYING -> fresh.setStatus(TaskStatus.DONE);
+                case COMPLETED, RETRYING, PARKED -> fresh.setStatus(TaskStatus.DONE);
                 case FAILED, UNKNOWN -> fresh.setStatus(TaskStatus.DEAD);
             }
             fresh.setLockedBy(null);

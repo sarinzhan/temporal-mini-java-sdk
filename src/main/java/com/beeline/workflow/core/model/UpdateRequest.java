@@ -2,8 +2,6 @@ package com.beeline.workflow.core.model;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -18,33 +16,39 @@ import java.time.Instant;
 @Getter
 @Setter
 @Entity
-@Table(name = "events", schema = "wflow")
-public class Event {
+@Table(name = "update_requests", schema = "wflow")
+public class UpdateRequest {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(name = "update_id", nullable = false, unique = true)
+    private String updateId;
+
     @Column(name = "workflow_id", nullable = false)
     private Long workflowId;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "event_type", nullable = false)
-    private EventType eventType;
+    @Column(name = "method_name", nullable = false)
+    private String methodName;
 
-    @Column(name = "command_type")
-    private String commandType;
-
-    @Column(name = "seq")
-    private Integer seq;
-
-    @Column(name = "activity_name")
-    private String activityName;
-
-    @Column(name = "payload", columnDefinition = "jsonb")
+    @Column(name = "args_payload", columnDefinition = "jsonb")
     @JdbcTypeCode(SqlTypes.JSON)
-    private String payload;
+    private String argsPayload;
+
+    @Column(nullable = false)
+    private String status = "PENDING";
+
+    @Column(columnDefinition = "jsonb")
+    @JdbcTypeCode(SqlTypes.JSON)
+    private String result;
+
+    @Column(columnDefinition = "text")
+    private String error;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
+
+    @Column(name = "completed_at")
+    private Instant completedAt;
 }

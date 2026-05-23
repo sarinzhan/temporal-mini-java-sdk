@@ -1,16 +1,27 @@
 export type WorkflowStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 export type EventType =
-  | 'WORKFLOW_STARTED'
+  | 'WORKFLOW_CREATED'
+  | 'WORKFLOW_TASK_QUEUED'
+  | 'WORKFLOW_TASK_STARTED'
+  | 'WORKFLOW_TASK_COMPLETED'
   | 'WORKFLOW_COMPLETED'
   | 'WORKFLOW_FAILED'
   | 'WORKFLOW_CANCELLED'
-  | 'WORKFLOW_RESUMED'
+  | 'ACTIVITY_SCHEDULED'
   | 'ACTIVITY_STARTED'
   | 'ACTIVITY_COMPLETED'
   | 'ACTIVITY_FAILED'
-  | 'ACTIVITY_RETRYING'
-  | 'SIGNAL_SENT';
+  | 'ACTIVITY_RETRY_SCHEDULED'
+  | 'TIMER_STARTED'
+  | 'TIMER_FIRED'
+  | 'AWAIT_BLOCKED'
+  | 'AWAIT_FIRED'
+  | 'SIGNAL_RECEIVED'
+  | 'UPDATE_REQUESTED'
+  | 'UPDATE_COMPLETED'
+  | 'SIDE_EFFECT_RECORDED'
+  | 'VERSION_MARKER';
 
 export interface WorkflowSummary {
   id: string;
@@ -30,9 +41,10 @@ export interface WorkflowDetail extends WorkflowSummary {
 export interface WorkflowEvent {
   id: number;
   eventType: EventType;
+  commandType: string | null;
+  seq: number | null;
   activityName: string | null;
-  attempt: number | null;
-  data: string | null;
+  payload: string | null;
   createdAt: string;
 }
 
