@@ -180,6 +180,7 @@ public class ActivityExecutorImpl implements ActivityExecutor {
                                int attempt,
                                ActivityOptions options,
                                Throwable cause) {
+        assertOwned();
         RetryPolicy policy = options.getRetryPolicy() != null ? options.getRetryPolicy() : RetryPolicy.defaultPolicy();
         boolean noRetry = cause instanceof NonRetryableException || policy.isNoRetry(cause);
         boolean exhausted = attempt >= policy.getMaxAttempts();
@@ -219,7 +220,14 @@ public class ActivityExecutorImpl implements ActivityExecutor {
         throw new ActivityFailureException(activityName, attempt, safeMessage(cause), cause);
     }
 
+    /** Fence: refuse to write if the workflow's task lease was lost to another node. */
+    private void assertOwned() {
+        WorkflowContext c = WorkflowContextHolder.current();
+        if (c != null) c.getTaskLease().assertOwned();
+    }
+
     private void saveEvent(Long workflowId, EventType type, int seq, String activityName, String payload) {
+        assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             Event e = new Event();
             e.setWorkflowId(workflowId);

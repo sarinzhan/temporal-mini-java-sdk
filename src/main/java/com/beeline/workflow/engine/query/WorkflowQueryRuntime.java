@@ -89,7 +89,7 @@ public class WorkflowQueryRuntime {
 
         WorkflowContextImpl ctx = new WorkflowContextImpl(
                 workflowId, null, activityExecutor, activityRegistry, cursor,
-                noopSink(), noopRegistrar());
+                noopSink(), noopRegistrar(), com.beeline.workflow.engine.replay.TaskLease.ALWAYS_OWNED);
         WorkflowContextHolder.set(ctx);
         try {
             try {

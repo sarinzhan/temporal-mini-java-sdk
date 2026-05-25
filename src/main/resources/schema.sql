@@ -25,6 +25,7 @@ CREATE TABLE wflow.tasks (
     locked_by    VARCHAR(255),
     locked_until TIMESTAMPTZ,
     locked_at    TIMESTAMPTZ,
+    lock_token   VARCHAR(64),                -- fencing token: unique per claim, checked before every write
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 

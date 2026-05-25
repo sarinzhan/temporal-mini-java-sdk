@@ -255,17 +255,17 @@ public final class Workflow {
 
     // ── Signals ─────────────────────────────────────────────────────────────
 
-    public static Object waitForSignal(String signalName) {
-        return waitForSignal(signalName, Duration.ofMinutes(5));
-    }
+//    public static Object waitForSignal(String signalName) {
+//        return waitForSignal(signalName, Duration.ofMinutes(5));
+//    }
 
-    public static Object waitForSignal(String signalName, Duration timeout) {
-        SignalBus bus = signalBus;
-        if (bus == null) {
-            throw new IllegalStateException(
-                    "SignalBus is not initialized. The Spring autoconfigure must call Workflow.installSignalBus().");
-        }
-        WorkflowContext ctx = WorkflowContextHolder.require();
-        return bus.await(ctx.getWorkflowId(), signalName, timeout);
-    }
+//    public static Object waitForSignal(String signalName, Duration timeout) {
+//        SignalBus bus = signalBus;
+//        if (bus == null) {
+//            throw new IllegalStateException(
+//                    "SignalBus is not initialized. The Spring autoconfigure must call Workflow.installSignalBus().");
+//        }
+//        WorkflowContext ctx = WorkflowContextHolder.require();
+//        return bus.await(ctx.getWorkflowId(), signalName, timeout);
+//    }
 }

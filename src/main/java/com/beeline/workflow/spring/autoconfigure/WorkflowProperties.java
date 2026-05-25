@@ -9,6 +9,7 @@ public class WorkflowProperties implements InitializingBean {
     private int workerPoolSize = 4;
     private long pollIntervalMs = 1000;
     private long lockTimeoutSeconds = 60;
+    private long leaseRenewIntervalMs = 20000;
     private long retryPollIntervalMs = 2000;
     private long timeoutWatcherIntervalMs = 5000;
 
@@ -22,6 +23,9 @@ public class WorkflowProperties implements InitializingBean {
 
     public long getLockTimeoutSeconds() { return lockTimeoutSeconds; }
     public void setLockTimeoutSeconds(long v) { this.lockTimeoutSeconds = v; }
+
+    public long getLeaseRenewIntervalMs() { return leaseRenewIntervalMs; }
+    public void setLeaseRenewIntervalMs(long v) { this.leaseRenewIntervalMs = v; }
 
     public long getRetryPollIntervalMs() { return retryPollIntervalMs; }
     public void setRetryPollIntervalMs(long v) { this.retryPollIntervalMs = v; }

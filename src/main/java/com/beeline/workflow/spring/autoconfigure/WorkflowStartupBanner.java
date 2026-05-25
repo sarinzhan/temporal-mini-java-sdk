@@ -24,7 +24,7 @@ public class WorkflowStartupBanner implements ApplicationListener<ApplicationRea
         WorkflowProperties.Instance inst = properties.getInstance();
         log.info("\n" +
                 "=======================================================\n" +
-                "         Beeline Workflow Engine - STARTED             \n" +
+                "                 Temporal Lite - STARTED               \n" +
                 "=======================================================\n" +
                 "  UI Dashboard    : {}/workflow/ui/index.html\n" +
                 "  REST API        : {}/workflow\n" +
@@ -34,6 +34,7 @@ public class WorkflowStartupBanner implements ApplicationListener<ApplicationRea
                 "  worker-pool-size            = {}\n" +
                 "  poll-interval-ms            = {}\n" +
                 "  lock-timeout-seconds        = {}\n" +
+                "  lease-renew-interval-ms     = {}\n" +
                 "  retry-poll-interval-ms      = {}\n" +
                 "  timeout-watcher-interval-ms = {}\n" +
                 "=======================================================",
@@ -43,6 +44,7 @@ public class WorkflowStartupBanner implements ApplicationListener<ApplicationRea
                 properties.getWorkerPoolSize(),
                 properties.getPollIntervalMs(),
                 properties.getLockTimeoutSeconds(),
+                properties.getLeaseRenewIntervalMs(),
                 properties.getRetryPollIntervalMs(),
                 properties.getTimeoutWatcherIntervalMs());
     }

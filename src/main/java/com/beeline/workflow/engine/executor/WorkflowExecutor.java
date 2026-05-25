@@ -13,7 +13,9 @@ import com.beeline.workflow.engine.replay.CommandType;
 import com.beeline.workflow.engine.replay.EventSink;
 import com.beeline.workflow.engine.replay.EventSinkImpl;
 import com.beeline.workflow.engine.replay.HistoryCursor;
+import com.beeline.workflow.engine.replay.LockLostException;
 import com.beeline.workflow.engine.replay.NonDeterminismException;
+import com.beeline.workflow.engine.replay.TaskLease;
 import com.beeline.workflow.engine.replay.WakeupRegistrar;
 import com.beeline.workflow.engine.replay.WakeupRegistrarImpl;
 import com.beeline.workflow.engine.replay.WorkflowParkedException;
@@ -81,7 +83,7 @@ public class WorkflowExecutor {
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
-    public Outcome execute(Task task) {
+    public Outcome execute(Task task, TaskLease lease) {
         WorkflowInstance wf = workflowRepository.findById(task.getWorkflowId()).orElse(null);
         if (wf == null) {
             log.warn("Task {} references missing workflow {} — discarding", task.getId(), task.getWorkflowId());
@@ -112,7 +114,7 @@ public class WorkflowExecutor {
         // Load history *before* writing TASK_STARTED so the cursor only sees prior turns.
         List<Event> history = eventRepository.findByWorkflowIdOrderByIdAsc(wf.getId());
         HistoryCursor cursor = new HistoryCursor(wf.getId(), history, objectMapper);
-        EventSink sink = new EventSinkImpl(wf.getId(), eventRepository, transactionTemplate);
+        EventSink sink = new EventSinkImpl(wf.getId(), eventRepository, transactionTemplate, lease);
         WakeupRegistrar wakeup = new WakeupRegistrarImpl(
                 wf.getId(), pendingTimerRepository, pendingAwaitRepository, transactionTemplate);
 
@@ -120,7 +122,7 @@ public class WorkflowExecutor {
         saveEvent(wf, EventType.WORKFLOW_TASK_STARTED, null);
 
         WorkflowContextImpl ctx = new WorkflowContextImpl(
-                wf.getId(), task.getId(), activityExecutor, activityRegistry, cursor, sink, wakeup);
+                wf.getId(), task.getId(), activityExecutor, activityRegistry, cursor, sink, wakeup, lease);
         WorkflowContextHolder.set(ctx);
         // Singleton workflow bean has shared mutable fields. Synchronize the whole turn (entry + updates)
         // so that concurrent workflow instances of the same type don't race on field state.
@@ -130,6 +132,11 @@ public class WorkflowExecutor {
                 // After the entry method parked/completed, dispatch any pending updates for this workflow.
                 processPendingUpdates(wf, bean);
                 return entryOutcome;
+            } catch (LockLostException lost) {
+                // Lease expired and another node reclaimed the task mid-turn. Discard this turn:
+                // every write was fenced, so nothing was persisted. The new owner takes over.
+                log.warn("[{}] lock lost during turn — discarding writes, another node owns the task", wf.getId());
+                return Outcome.LOST;
             } catch (Exception ex) {
                 markFailed(wf, safeMessage(ex));
                 saveEvent(wf, EventType.WORKFLOW_FAILED, safeMessage(ex));
@@ -141,6 +148,12 @@ public class WorkflowExecutor {
         }
     }
 
+    /** Fence: throw {@link LockLostException} if we no longer own the task driving this turn. */
+    private void assertOwned() {
+        var c = WorkflowContextHolder.current();
+        if (c != null) c.getTaskLease().assertOwned();
+    }
+
     private Outcome runEntry(WorkflowInstance wf, Object bean, Method entryMethod, Object[] callArgs) {
         try {
             Object result = entryMethod.invoke(bean, callArgs);
@@ -150,6 +163,9 @@ public class WorkflowExecutor {
             return Outcome.COMPLETED;
         } catch (InvocationTargetException ite) {
             Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
+            if (cause instanceof LockLostException lost) {
+                throw lost;  // handled in execute(): discard the turn, don't mark failed
+            }
             if (cause instanceof WorkflowParkedException parked) {
                 log.info("[{}] workflow parked: {} seq={}", wf.getId(), parked.getKind(), parked.getSeq());
                 saveEvent(wf, EventType.WORKFLOW_TASK_COMPLETED, null);
@@ -172,6 +188,8 @@ public class WorkflowExecutor {
             saveEvent(wf, EventType.WORKFLOW_FAILED, safeMessage(cause));
             saveEvent(wf, EventType.WORKFLOW_TASK_COMPLETED, null);
             return Outcome.FAILED;
+        } catch (LockLostException lost) {
+            throw lost;  // a fenced write (markCompleted/saveEvent) detected the lost lock
         } catch (Exception ex) {
             markFailed(wf, safeMessage(ex));
             saveEvent(wf, EventType.WORKFLOW_FAILED, safeMessage(ex));
@@ -191,11 +209,15 @@ public class WorkflowExecutor {
                 continue;
             }
             try {
+                assertOwned();
                 Object[] args = buildUpdateArgs(updateMethod, req.getArgsPayload());
                 Object result = updateMethod.invoke(bean, args);
                 completeUpdateSuccess(req, result);
+            } catch (LockLostException lost) {
+                throw lost;  // stop dispatching updates — we lost the lock
             } catch (InvocationTargetException ite) {
                 Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
+                if (cause instanceof LockLostException lost) throw lost;
                 completeUpdateFailure(req, safeMessage(cause));
             } catch (Exception ex) {
                 completeUpdateFailure(req, safeMessage(ex));
@@ -204,6 +226,7 @@ public class WorkflowExecutor {
     }
 
     private void completeUpdateSuccess(UpdateRequest req, Object result) {
+        assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             req.setStatus("COMPLETED");
             req.setResult(serialize(result));
@@ -225,6 +248,7 @@ public class WorkflowExecutor {
     }
 
     private void completeUpdateFailure(UpdateRequest req, String error) {
+        assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             req.setStatus("FAILED");
             req.setError(error);
@@ -276,6 +300,7 @@ public class WorkflowExecutor {
     }
 
     private void markRunning(WorkflowInstance wf) {
+        assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             wf.setStatus(WorkflowStatus.RUNNING);
             wf.setUpdatedAt(Instant.now());
@@ -284,6 +309,7 @@ public class WorkflowExecutor {
     }
 
     private void markCompleted(WorkflowInstance wf, Object result) {
+        assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             wf.setStatus(WorkflowStatus.COMPLETED);
             wf.setResult(serialize(result));
@@ -295,6 +321,7 @@ public class WorkflowExecutor {
     }
 
     private void markFailed(WorkflowInstance wf, String error) {
+        assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             wf.setStatus(WorkflowStatus.FAILED);
             wf.setError(error);
@@ -304,6 +331,7 @@ public class WorkflowExecutor {
     }
 
     private void saveEvent(WorkflowInstance wf, EventType type, String payload) {
+        assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             Event e = new Event();
             e.setWorkflowId(wf.getId());
@@ -371,6 +399,8 @@ public class WorkflowExecutor {
         RETRYING,
         PARKED,
         FAILED,
-        UNKNOWN
+        UNKNOWN,
+        /** Lease was lost mid-turn; writes were discarded and the new owner takes over. */
+        LOST
     }
 }

@@ -4,6 +4,7 @@ import com.beeline.workflow.core.api.WorkflowContext;
 import com.beeline.workflow.engine.executor.ActivityExecutor;
 import com.beeline.workflow.engine.replay.EventSink;
 import com.beeline.workflow.engine.replay.HistoryCursor;
+import com.beeline.workflow.engine.replay.TaskLease;
 import com.beeline.workflow.engine.replay.WakeupRegistrar;
 import com.beeline.workflow.registry.ActivityRegistry;
 
@@ -16,6 +17,7 @@ public final class WorkflowContextImpl implements WorkflowContext {
     private final HistoryCursor historyCursor;
     private final EventSink eventSink;
     private final WakeupRegistrar wakeupRegistrar;
+    private final TaskLease taskLease;
 
     public WorkflowContextImpl(Long workflowId,
                                Long currentTaskId,
@@ -23,7 +25,8 @@ public final class WorkflowContextImpl implements WorkflowContext {
                                ActivityRegistry activityRegistry,
                                HistoryCursor historyCursor,
                                EventSink eventSink,
-                               WakeupRegistrar wakeupRegistrar) {
+                               WakeupRegistrar wakeupRegistrar,
+                               TaskLease taskLease) {
         this.workflowId = workflowId;
         this.currentTaskId = currentTaskId;
         this.activityExecutor = activityExecutor;
@@ -31,6 +34,7 @@ public final class WorkflowContextImpl implements WorkflowContext {
         this.historyCursor = historyCursor;
         this.eventSink = eventSink;
         this.wakeupRegistrar = wakeupRegistrar;
+        this.taskLease = taskLease;
     }
 
     @Override public Long getWorkflowId() { return workflowId; }
@@ -44,6 +48,8 @@ public final class WorkflowContextImpl implements WorkflowContext {
     @Override public EventSink getEventSink() { return eventSink; }
 
     @Override public WakeupRegistrar getWakeupRegistrar() { return wakeupRegistrar; }
+
+    @Override public TaskLease getTaskLease() { return taskLease; }
 
     public Long getCurrentTaskId() { return currentTaskId; }
 }

@@ -25,10 +25,34 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Modifying
     @Query(value = """
             UPDATE wflow.tasks
-            SET status = 'PENDING', locked_by = NULL, locked_at = NULL, locked_until = NULL
+            SET status = 'PENDING', locked_by = NULL, locked_at = NULL, locked_until = NULL, lock_token = NULL
             WHERE status = 'PROCESSING' AND locked_until < now()
             """, nativeQuery = true)
     int resetStaleLocks();
+
+    /**
+     * Extend the lease of a task we still own. Returns 1 if our token still matches (lease kept),
+     * 0 if the task was reclaimed by another node (we lost it).
+     */
+    @Modifying
+    @Query(value = """
+            UPDATE wflow.tasks
+            SET locked_until = :until
+            WHERE id = :id AND lock_token = :token AND status = 'PROCESSING'
+            """, nativeQuery = true)
+    int renewLease(@Param("id") Long id, @Param("token") String token, @Param("until") java.time.Instant until);
+
+    /**
+     * Finalize a task only if we still own it (fencing). Returns 1 on success, 0 if the lease was
+     * lost — in which case the new owner is responsible and we must not overwrite its state.
+     */
+    @Modifying
+    @Query(value = """
+            UPDATE wflow.tasks
+            SET status = :status, locked_by = NULL, locked_at = NULL, locked_until = NULL, lock_token = NULL
+            WHERE id = :id AND lock_token = :token
+            """, nativeQuery = true)
+    int finalizeIfOwned(@Param("id") Long id, @Param("token") String token, @Param("status") String status);
 
     @Query(value = """
             SELECT * FROM wflow.tasks

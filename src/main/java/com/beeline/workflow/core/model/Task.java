@@ -51,6 +51,9 @@ public class Task {
     @Column(name = "locked_until")
     private Instant lockedUntil;
 
+    @Column(name = "lock_token")
+    private String lockToken;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 }

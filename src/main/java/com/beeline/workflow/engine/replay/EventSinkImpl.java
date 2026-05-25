@@ -10,13 +10,16 @@ public final class EventSinkImpl implements EventSink {
     private final Long workflowId;
     private final EventRepository eventRepository;
     private final TransactionTemplate transactionTemplate;
+    private final TaskLease lease;
 
     public EventSinkImpl(Long workflowId,
                          EventRepository eventRepository,
-                         TransactionTemplate transactionTemplate) {
+                         TransactionTemplate transactionTemplate,
+                         TaskLease lease) {
         this.workflowId = workflowId;
         this.eventRepository = eventRepository;
         this.transactionTemplate = transactionTemplate;
+        this.lease = lease;
     }
 
     @Override
@@ -25,6 +28,7 @@ public final class EventSinkImpl implements EventSink {
                        Integer seq,
                        String activityName,
                        String payload) {
+        lease.assertOwned();
         transactionTemplate.executeWithoutResult(s -> {
             Event e = new Event();
             e.setWorkflowId(workflowId);

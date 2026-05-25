@@ -1,108 +1,61 @@
-# beeline-workflow
+# temporal-lite
 
-Lightweight durable workflow engine for Spring Boot, backed by PostgreSQL. No external infrastructure — no Temporal cluster, no Conductor, no message broker. Just your Spring app and the database you already have.
+Лёгкий движок **долговечных (durable) workflow** для Spring Boot. Идеи и API заимствованы у [Temporal](https://docs.temporal.io), но без отдельного кластера, без message-broker'а и без кодогенерации — нужны только ваше Spring Boot-приложение и PostgreSQL, который у вас наверняка уже есть.
 
-You write workflows as plain Java methods, call activities (either through typed interfaces or via a functional API), and the engine guarantees:
+Вы пишете бизнес-логику обычными Java-методами, вызываете из них активности, а движок гарантирует, что:
 
-- each successful activity runs **at most once** per workflow (replay-safe cache by `(workflow_id, activity_name)`);
-- failed activities are **retried** according to a configurable `RetryPolicy` (exponential backoff, non-retryable classes);
-- per-activity **timeout** through `CompletableFuture`;
-- workflows **survive process restarts** — state lives in Postgres;
-- **multi-instance**: any number of replicas pull from the same task queue using `SELECT … FOR UPDATE SKIP LOCKED`;
-- **JDK Proxy only** — no CGLIB, no bytecode rewriting.
+- каждая успешная активность выполнится **не более одного раза** — её результат сохраняется в историю и переиспользуется при повторном проигрывании;
+- упавшие активности **повторяются** по настраиваемой `RetryPolicy` (экспоненциальный backoff);
+- workflow **переживают рестарт процесса** — всё состояние лежит в Postgres, а не в памяти;
+- можно запустить **сколько угодно реплик** приложения — они разбирают задачи из одной очереди через `SELECT … FOR UPDATE SKIP LOCKED`;
+- workflow можно **усыплять на дни** (`sleep`), слать им **сигналы**, спрашивать **состояние** (query) и **менять** его на лету (update).
+
+> Если вы знакомы с Temporal — здесь те же понятия: Workflow, Activity, Signal, Query, Update, Timer, Side Effect, Retry Policy, версионирование. Просто меньше инфраструктуры. По ходу текста я ссылаюсь на оригинальную документацию Temporal — там те же концепции описаны подробнее.
 
 ---
 
-## Table of contents
+## Содержание
 
-- [Architecture](#architecture)
-- [Quick start](#quick-start)
-- [Writing a workflow](#writing-a-workflow)
-- [Two styles of activities](#two-styles-of-activities)
-- [Retry policies](#retry-policies)
-- [Workflow lifecycle & states](#workflow-lifecycle--states)
-- [Signals](#signals)
-- [Multi-instance deployment](#multi-instance-deployment)
-- [Cluster REST API](#cluster-rest-api)
-- [Configuration reference](#configuration-reference)
-- [Database schema](#database-schema)
+- [Чем temporal-lite отличается от Temporal](#чем-temporal-lite-отличается-от-temporal)
+- [Установка и запуск](#установка-и-запуск)
+- [Основные понятия](#основные-понятия)
+- [Пишем первый workflow](#пишем-первый-workflow)
+- [Активности](#активности)
+- [Политика повторов (RetryPolicy)](#политика-повторов-retrypolicy)
+- [Таймеры и ожидание: `sleep` и `await`](#таймеры-и-ожидание-sleep-и-await)
+- [Сигналы](#сигналы)
+- [Queries — чтение состояния](#queries--чтение-состояния)
+- [Updates — изменение состояния](#updates--изменение-состояния)
+- [Детерминизм: `sideEffect` и версионирование](#детерминизм-sideeffect-и-версионирование)
+- [Запуск и управление workflow](#запуск-и-управление-workflow)
+- [Правила, которым нужно следовать](#правила-которым-нужно-следовать)
+- [Конфигурация](#конфигурация)
+- [Несколько реплик (multi-instance)](#несколько-реплик-multi-instance)
+- [REST API и UI](#rest-api-и-ui)
+- [Как это устроено внутри (архитектура)](#как-это-устроено-внутри-архитектура)
 - [FAQ](#faq)
 
 ---
 
-## Architecture
+## Чем temporal-lite отличается от Temporal
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                          your Spring Boot app                          │
-│                                                                        │
-│   @WorkflowComponent class OrderWorkflow { ... }                       │
-│   @Activity         interface PaymentActivity { ... }                  │
-│   @Service          class PaymentActivityImpl implements ... { ... }   │
-│                                                                        │
-│                              │                                         │
-│                              ▼                                         │
-│    WorkflowClient ──► workflows + tasks (one tx, INSERT both)          │
-│                                                                        │
-│    WorkerLoop @Scheduled ──► SELECT FOR UPDATE SKIP LOCKED             │
-│         │                                                              │
-│         ├─► claim batch (PROCESSING, locked_by, locked_at)             │
-│         ├─► thread pool (worker-pool-size)                             │
-│         │     │                                                        │
-│         │     ▼                                                        │
-│         │   WorkflowExecutor                                           │
-│         │     ├─► find @WorkflowComponent bean by type                 │
-│         │     ├─► set WorkflowContextHolder (ThreadLocal)              │
-│         │     ├─► invoke entry method                                  │
-│         │     │     │                                                  │
-│         │     │     ▼                                                  │
-│         │     │   activity stub (JDK Proxy) OR Workflow.activity(...)  │
-│         │     │     │                                                  │
-│         │     │     ▼                                                  │
-│         │     │   ActivityExecutor                                     │
-│         │     │     ├─ SELECT activity_results — if COMPLETED, return  │
-│         │     │     │     cached + skip execution                      │
-│         │     │     ├─ CompletableFuture.get(startToCloseTimeout)      │
-│         │     │     ├─ success: UPSERT activity_results,               │
-│         │     │     │           INSERT events(ACTIVITY_COMPLETED)      │
-│         │     │     └─ failure: → RetryPolicy →                        │
-│         │     │           INSERT retries(fire_at=now+backoff)          │
-│         │     │           OR mark DEAD                                 │
-│         │     └─ finalize: workflow status, event log                  │
-│         └─► task → DONE / DEAD                                         │
-│                                                                        │
-│    RetryScheduler @Scheduled ──► retries where fire_at<=now →          │
-│                                  INSERT tasks(PENDING)                 │
-│                                                                        │
-│    TimeoutWatcher @Scheduled ──► reset stale PROCESSING tasks          │
-│                                                                        │
-│    InstanceRegistryService @Scheduled(10s) ──► UPSERT instance_registry│
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-                          ┌────────────────┐
-                          │   PostgreSQL   │
-                          │                │
-                          │  workflows     │
-                          │  tasks         │
-                          │  activity_*    │
-                          │  retries       │
-                          │  events        │
-                          │  signals       │
-                          │  instance_*    │
-                          └────────────────┘
-```
+| | Temporal | temporal-lite |
+|---|---|---|
+| Инфраструктура | отдельный кластер + БД | только Postgres |
+| Worker | отдельный процесс | те же бины внутри вашего Spring-приложения |
+| Регистрация | через `WorkflowClient`/`Worker` API | через аннотации Spring (`@WorkflowComponent`, `@Activity`) |
+| Активности | выполняются на отдельном worker'е, workflow-поток свободен | выполняются **в том же потоке** воркера (синхронно, с таймаутом) |
+| Стабы активностей | кодогенерация / динамические прокси | только JDK Proxy, без CGLIB и байткода |
+| Хранилище истории | внутреннее | таблицы в схеме `wflow` вашего Postgres |
+| Масштабирование | через task queue кластера | реплики приложения тянут задачи из общей таблицы |
 
-**Key idea — replay cache.** When an activity is called, the engine first checks `activity_results` for a row matching `(workflow_id, activity_name)`. If `status = 'COMPLETED'`, the cached JSON is deserialized and returned without invoking the activity body. So even when the workflow is re-entered (for example, after a worker crash mid-flight), already-successful steps are skipped.
-
-The runtime class of the result is captured at the first success (`activity_results.result_type`) and used on replay to deserialize back to the right Java type — you don't need to pass a `Class<T>` token.
+Это не замена Temporal для нагрузок «миллион workflow в секунду». Это способ получить **долговечное выполнение** там, где разворачивать целый кластер — оверкилл.
 
 ---
 
-## Quick start
+## Установка и запуск
 
-### 1. Add the dependency
+### 1. Подключите зависимость
 
 ```xml
 <dependency>
@@ -112,48 +65,90 @@ The runtime class of the result is captured at the first success (`activity_resu
 </dependency>
 ```
 
-You also need:
-- `spring-boot-starter-data-jpa` (compile-time dep)
-- a JDBC driver (PostgreSQL is what the bundled migrations target)
-- `spring-boot-starter-web` if you want the cluster REST endpoints
+Также понадобятся (если их ещё нет в вашем приложении):
 
-### 2. Configure your DataSource
+- `spring-boot-starter-data-jpa`
+- JDBC-драйвер PostgreSQL
+- `spring-boot-starter-web` — если нужны REST-эндпоинты и UI
+
+> Требуется Spring Boot 4.x. Сериализация — Jackson 3 (`tools.jackson`).
+
+### 2. Создайте схему в базе
+
+Движок хранит всё в схеме `wflow`. Схема **не создаётся автоматически** — примените `schema.sql` (лежит в ресурсах) к вашей базе один раз перед стартом:
+
+```bash
+psql "$DB_URL" -f schema.sql
+```
+
+### 3. Настройте подключение к базе
 
 ```properties
 spring.datasource.url=jdbc:postgresql://localhost:5432/myapp
 spring.datasource.username=app
 spring.datasource.password=secret
+spring.jpa.hibernate.ddl-auto=none
 ```
 
-Flyway runs `db/migration/V1__*.sql` … `V9__*.sql` from inside the jar on first startup.
+Автоконфигурация Spring Boot поднимет воркер, реестры и REST-слой сама — отдельной аннотации `@Enable…` не нужно.
 
-### 3. Write an activity
+Для локальной разработки в репозитории есть `docker-compose.yml` с Postgres.
+
+---
+
+## Основные понятия
+
+| Понятие | В temporal-lite | Аналог в Temporal |
+|---|---|---|
+| **Workflow** | класс с `@WorkflowComponent` и одним методом-входом | [Workflow](https://docs.temporal.io/workflows) |
+| **Activity** | интерфейс с `@Activity` (или просто лямбда) | [Activity](https://docs.temporal.io/activities) |
+| **Timer** | `Workflow.sleep(Duration)` | [Durable Timer](https://docs.temporal.io/workflows#timer) |
+| **Signal** | `Workflow.waitForSignal(...)` + REST | [Signal](https://docs.temporal.io/sending-messages#signals) |
+| **Query** | метод с `@QueryMethod` | [Query](https://docs.temporal.io/sending-messages#queries) |
+| **Update** | метод с `@UpdateMethod` | [Update](https://docs.temporal.io/sending-messages#updates) |
+| **Side Effect** | `Workflow.sideEffect(...)` | [Side Effect](https://docs.temporal.io/workflows#side-effects) |
+| **Versioning** | `Workflow.getVersion(...)` | [Patching/Versioning](https://docs.temporal.io/patching) |
+| **Retry Policy** | `RetryPolicy` | [Retry Policy](https://docs.temporal.io/encyclopedia/retry-policies) |
+
+Главная идея, общая с Temporal: **код workflow проигрывается заново** (replay) после рестартов и пауз. Поэтому он должен быть детерминированным, а все обращения к внешнему миру — спрятаны в активности. Подробнее — в разделе [Правила, которым нужно следовать](#правила-которым-нужно-следовать).
+
+---
+
+## Пишем первый workflow
+
+### Активность
+
+Активность — это всё «грязное»: вызовы по сети, запись в БД, обращения к внешним API. Объявите интерфейс с `@Activity`, а реализацию сделайте обычным Spring-бином.
 
 ```java
-// Interface — must be annotated with @Activity
 @Activity
 public interface PaymentActivity {
     PaymentResult charge(String orderId, BigDecimal amount);
     void refund(String orderId);
 }
 
-// Implementation — plain Spring bean
 @Service
 public class PaymentActivityImpl implements PaymentActivity {
+    @Override
     public PaymentResult charge(String orderId, BigDecimal amount) {
-        // your real payment-gateway call
+        // реальный вызов платёжного шлюза
         return new PaymentResult("tx-" + orderId, "OK");
     }
+    @Override
     public void refund(String orderId) { /* ... */ }
 }
 
 public record PaymentResult(String transactionId, String status) {}
 ```
 
-### 4. Write a workflow
+Реализация подхватывается автоматически: любой бин, реализующий `@Activity`-интерфейс, попадает в реестр активностей.
+
+### Workflow
+
+Workflow — это класс с `@WorkflowComponent` и **одним методом-входом**. Внутри метода вы оркеструете активности.
 
 ```java
-@WorkflowComponent              // value() not set → type = "OrderWorkflow"
+@WorkflowComponent              // тип workflow = "OrderWorkflow" (имя класса)
 public class OrderWorkflow {
 
     private final PaymentActivity payment = Workflow.newActivityStub(
@@ -162,14 +157,11 @@ public class OrderWorkflow {
                     .setStartToCloseTimeout(Duration.ofSeconds(30))
                     .setRetryPolicy(RetryPolicy.newBuilder()
                             .setMaxAttempts(3)
-                            .setInitialInterval(Duration.ofSeconds(1))
-                            .setBackoffCoefficient(2.0)
                             .addNoRetry(IllegalArgumentException.class)
                             .build())
-                    .build()
-    );
+                    .build());
 
-    // single-param entry method — input is deserialized from JSON
+    // метод-вход: один параметр десериализуется из JSON-входа workflow
     public String processOrder(OrderInput input) {
         PaymentResult result = payment.charge(input.orderId(), input.amount());
         return result.transactionId();
@@ -179,7 +171,250 @@ public class OrderWorkflow {
 public record OrderInput(String orderId, BigDecimal amount) {}
 ```
 
-### 5. Start a workflow
+Правила определения метода-входа:
+
+- метод должен быть `public`, не `static`, объявлен в самом классе;
+- если такой публичный метод **ровно один** — он и есть вход;
+- если их несколько — движок ищет метод с именем `run`;
+- параметров — **0 или 1**. Если один, вход workflow (JSON) десериализуется в его тип. Возвращаемое значение становится результатом workflow.
+
+Имя типа workflow по умолчанию — имя класса. Можно переопределить: `@WorkflowComponent("order-flow-v2")`.
+
+---
+
+## Активности
+
+Активности можно вызывать **двумя способами** — выбирайте по вкусу, семантика (кэш, повторы, таймаут) одинаковая.
+
+### A. Типизированный стаб (рекомендуется)
+
+```java
+private final PaymentActivity payment =
+        Workflow.newActivityStub(PaymentActivity.class, options);
+
+// вызываем как обычный метод
+PaymentResult r = payment.charge(orderId, amount);
+```
+
+- типобезопасно, удобно в IDE;
+- имя активности выводится как `Интерфейс.метод` (например, `PaymentActivity.charge`);
+- стаб — это JDK Proxy, его **безопасно создавать прямо в поле** класса: до первого вызова он ничего не делает;
+- `Workflow.newActivityStub(PaymentActivity.class)` без опций использует значения по умолчанию.
+
+### B. Функциональный API
+
+Когда заводить интерфейс лень или нужен разовый вызов:
+
+```java
+// с опциями
+PaymentResult r = Workflow.activity("charge",
+        ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(30)).build(),
+        () -> gateway.charge(orderId, amount));
+
+// с явным входом
+String ack = Workflow.activity("confirm", r, x -> notifier.send(x.transactionId()));
+
+// только побочный эффект (Runnable), без результата
+Workflow.activity("audit", () -> auditLog.record(orderId));
+
+// короткая форма — опции по умолчанию
+String s = Workflow.activity("simple", () -> svc.doSomething());
+```
+
+> **Имя активности должно быть уникальным внутри одного workflow.** Это ключ кэша результата. Два вызова с одинаковым именем в одном workflow столкнутся. У типизированных стабов имя выводится автоматически, у функционального API — на вашей ответственности.
+
+Оба стиля можно смешивать в одном workflow.
+
+---
+
+## Политика повторов (RetryPolicy)
+
+Аналог [Retry Policy в Temporal](https://docs.temporal.io/encyclopedia/retry-policies).
+
+```java
+RetryPolicy.defaultPolicy();   // maxAttempts=3, initialInterval=1s, backoff=2.0, maxInterval=10m
+
+RetryPolicy.newBuilder()
+    .setMaxAttempts(5)                          // всего попыток (первая + повторы); 1 = без повторов
+    .setInitialInterval(Duration.ofSeconds(2))
+    .setBackoffCoefficient(2.0)                 // задержка = initial * (backoff ^ номер_попытки)
+    .setMaxInterval(Duration.ofMinutes(10))     // потолок задержки
+    .addNoRetry(IllegalArgumentException.class) // эти исключения не повторяем
+    .build();
+```
+
+Что происходит при падении активности:
+
+- бросили `NonRetryableException` или исключение из `addNoRetry(...)` → повтора **нет**, workflow → `FAILED`;
+- попытки ещё остались → активность переедет в таблицу повторов и выполнится снова через `initial × backoff^попытка`;
+- попытки исчерпаны → workflow → `FAILED`.
+
+`ActivityOptions` также задаёт `startToCloseTimeout` (по умолчанию 1 минута) — максимальное время одной попытки.
+
+---
+
+## Таймеры и ожидание: `sleep` и `await`
+
+### `Workflow.sleep(Duration)` — долговечный таймер
+
+```java
+public void run() {
+    sendWelcomeEmail();
+    Workflow.sleep(Duration.ofDays(3));   // воркер освобождается на 3 дня
+    sendFollowUpEmail();
+}
+```
+
+Это **не** `Thread.sleep`. Workflow «паркуется»: поток воркера освобождается, состояние остаётся в базе, а через указанное время задача снова попадёт в очередь и код продолжится с этого места. Можно спать минуты, часы, дни. Аналог [Durable Timer](https://docs.temporal.io/workflows#timer).
+
+### `Workflow.await(timeout, condition)` — ждать условие
+
+Блокирует workflow, пока `condition` не станет `true` (обычно условие меняется из update-метода или сигнала).
+
+```java
+boolean approved = Workflow.await(Duration.ofHours(24), () -> this.approved);
+if (!approved) {
+    // вышли по таймауту
+}
+```
+
+Возвращает `true`, если условие выполнилось, и `false`, если истёк таймаут.
+
+---
+
+## Сигналы
+
+Сигнал — это асинхронное сообщение снаружи внутрь работающего workflow. Аналог [Signal](https://docs.temporal.io/sending-messages#signals).
+
+Внутри workflow ждём сигнал:
+
+```java
+Object payload = Workflow.waitForSignal("approval", Duration.ofMinutes(10));
+if (payload == null) {
+    throw new NonRetryableException("Approval timeout");
+}
+```
+
+`waitForSignal(name)` без таймаута ждёт по умолчанию 5 минут.
+
+Послать сигнал снаружи — через REST (см. ниже) или программно через `SignalBus`:
+
+```java
+@Autowired SignalBus signalBus;
+signalBus.send(workflowId, "approval", Map.of("by", "manager-42"));
+```
+
+---
+
+## Queries — чтение состояния
+
+Query — это **read-only** запрос текущего состояния работающего (или уже завершённого) workflow, без его изменения. Аналог [Query](https://docs.temporal.io/sending-messages#queries).
+
+Пометьте метод `@QueryMethod`:
+
+```java
+@WorkflowComponent
+public class OrderWorkflow {
+
+    private String stage = "created";
+
+    public String run(OrderInput in) {
+        stage = "charging";
+        payment.charge(in.orderId(), in.amount());
+        stage = "done";
+        return "ok";
+    }
+
+    @QueryMethod                       // имя query = имя метода ("currentStage")
+    public String currentStage() {
+        return stage;
+    }
+}
+```
+
+Имя query по умолчанию — имя метода; можно задать явно: `@QueryMethod(name = "stage")`.
+
+Вызвать query:
+
+```http
+POST /workflow/api/workflows/{id}/query/currentStage
+Content-Type: application/json
+
+{ "args": [] }
+```
+
+> Query-метод выполняется на **свежем экземпляре** workflow, прогнанном по истории, поэтому он не должен ничего менять и не должен вызывать активности, `sleep` и т.п. Только чтение полей.
+
+---
+
+## Updates — изменение состояния
+
+Update — это запрос снаружи, который **меняет** состояние workflow и возвращает результат. Аналог [Update](https://docs.temporal.io/sending-messages#updates).
+
+```java
+@WorkflowComponent
+public class OrderWorkflow {
+
+    private boolean approved = false;
+
+    public String run(OrderInput in) {
+        boolean ok = Workflow.await(Duration.ofHours(24), () -> approved);
+        return ok ? "approved" : "rejected";
+    }
+
+    @UpdateMethod                      // имя update = имя метода ("approve")
+    public String approve(String who) {
+        this.approved = true;
+        return "approved by " + who;
+    }
+}
+```
+
+Вызвать update (синхронно дождётся результата):
+
+```http
+POST /workflow/api/workflows/{id}/update/approve?timeoutMs=30000
+Content-Type: application/json
+
+{ "args": ["manager-42"] }
+```
+
+Update-методы исполняются движком после каждого «хода» workflow, а результат сохраняется в `update_requests`.
+
+---
+
+## Детерминизм: `sideEffect` и версионирование
+
+Поскольку код workflow проигрывается заново, любая недетерминированность (случайные числа, текущее время, UUID) сломает воспроизведение. Для таких случаев есть два инструмента — как в Temporal.
+
+### `Workflow.sideEffect` — записать недетерминированное значение один раз
+
+Выполняет функцию **один раз** и сохраняет результат в историю; при повторном проигрывании возвращает сохранённое значение, не вызывая функцию заново. Аналог [Side Effect](https://docs.temporal.io/workflows#side-effects).
+
+```java
+String requestId = Workflow.sideEffect(String.class, () -> UUID.randomUUID().toString());
+```
+
+### `Workflow.getVersion` — безопасно менять логику работающих workflow
+
+Когда нужно изменить код workflow, для которого уже есть запущенные экземпляры, используйте версионирование вместо «просто поправить и задеплоить». Аналог [Patching/Versioning](https://docs.temporal.io/patching).
+
+```java
+int v = Workflow.getVersion("use-new-payment", Workflow.DEFAULT_VERSION, 1);
+if (v == Workflow.DEFAULT_VERSION) {
+    legacyCharge();      // старые workflow идут по старому пути
+} else {
+    newCharge();         // новые — по новому
+}
+```
+
+---
+
+## Запуск и управление workflow
+
+### Запуск из кода
+
+Внедрите `WorkflowClient` и стартуйте workflow по его типу:
 
 ```java
 @RestController
@@ -192,205 +427,77 @@ public class OrderController {
     }
 
     @PostMapping("/orders")
-    public Map<String, UUID> startOrder(@RequestBody OrderInput input) {
-        UUID workflowId = workflowClient.startWorkflow("OrderWorkflow", input);
+    public Map<String, Long> start(@RequestBody OrderInput input) {
+        Long workflowId = workflowClient.startWorkflow("OrderWorkflow", input);
         return Map.of("workflowId", workflowId);
     }
 }
 ```
 
----
+`startWorkflow(type, input)` создаёт workflow, ставит задачу в очередь и сразу возвращает его `id` (`Long`). Само выполнение подхватит воркер асинхронно.
 
-## Writing a workflow
+### Управление снаружи (REST)
 
-A workflow class is a regular Spring bean annotated with `@WorkflowComponent`. It must expose a single entry method:
-
-- public, non-static, non-synthetic, declared on the class itself;
-- if there's exactly **one** such method, it's used automatically;
-- otherwise the engine looks for a method named `run`;
-- the method may take **0 or 1 parameters**. With 1 parameter, the input JSON from `workflows.input` is deserialized into that type.
-
-**`@WorkflowComponent` is a meta-`@Component`**, so Spring picks the class up via component scan. You can pass a value to override the workflow type:
-
-```java
-@WorkflowComponent("order-flow-v2")
-public class OrderWorkflow { ... }
-```
-
-Default type when value is omitted is the simple class name.
-
-### Determinism
-
-Code in a workflow method **between** activity calls runs on every replay (in this lightweight engine, currently a replay = a fresh worker pickup after a retry-eligible failure). Keep that code deterministic and side-effect-free:
-
-- ✅ parsing input, branching, building activity arguments
-- ✅ calling other activities
-- ❌ direct DB writes, HTTP calls, file I/O — wrap those in activities
-- ❌ `Math.random()`, `Instant.now()` in branching logic — feed timestamps in via activity results if you need them deterministic
+| Действие | Запрос |
+|---|---|
+| Послать сигнал | `POST /workflow/api/workflows/{id}/signal` — тело `{ "signalName": "...", "payload": {...} }` |
+| Query | `POST /workflow/api/workflows/{id}/query/{name}` — тело `{ "args": [...] }` |
+| Update | `POST /workflow/api/workflows/{id}/update/{name}?timeoutMs=30000` — тело `{ "args": [...] }` |
+| Отменить | `POST /workflow/api/workflows/{id}/cancel` |
+| Возобновить | `POST /workflow/api/workflows/{id}/resume` |
+| Повторить «мёртвую» активность | `POST /workflow/api/workflows/{id}/activities/{activityName}/retry` |
 
 ---
 
-## Two styles of activities
+## Правила, которым нужно следовать
 
-### A. Typed interface stub (recommended)
+Это самое важное при написании workflow. Они повторяют [deterministic constraints](https://docs.temporal.io/workflows#deterministic-constraints) Temporal.
 
-```java
-private final PaymentActivity payment =
-        Workflow.newActivityStub(PaymentActivity.class, options);
+**Код метода workflow должен быть детерминированным.** При проигрывании он выполнится снова, и должен пойти ровно по тому же пути.
 
-// call as a normal method
-PaymentResult r = payment.charge(orderId, amount);
-```
+✅ Можно прямо в workflow:
+- разбирать вход, ветвиться, готовить аргументы активностей;
+- вызывать активности, `sleep`, `await`, ждать сигналы;
+- читать/писать **свои поля** (для query/update/await).
 
-- Type-safe, IDE-friendly
-- Activity name auto-derived as `InterfaceName.methodName` (e.g. `PaymentActivity.charge`)
-- Implementation must be a `@Service` (or any Spring bean) implementing the `@Activity` interface — auto-wired into `ActivityRegistry`
-- The stub is a JDK Proxy created lazily. **Creating it in a field initializer is safe** — the proxy never accesses any registry at construction time, only when a method is actually invoked inside a workflow execution.
+❌ Нельзя прямо в workflow (только внутри активностей):
+- ходить в БД, по сети, в файлы, во внешние API;
+- `new Random()`, `Instant.now()`, `UUID.randomUUID()` в логике ветвления — вместо этого `Workflow.sideEffect(...)`;
+- `Thread.sleep(...)` — вместо этого `Workflow.sleep(...)`;
+- запускать свои потоки, использовать глобальное изменяемое состояние.
 
-### B. Functional API (familiar to users of the old temporal-mini)
+И ещё несколько практических правил:
 
-```java
-PaymentResult r = Workflow.activity(
-        "charge",
-        ActivityOptions.newBuilder()
-                .setStartToCloseTimeout(Duration.ofSeconds(30))
-                .setRetryPolicy(RetryPolicy.newBuilder().setMaxAttempts(3).build())
-                .build(),
-        () -> gateway.charge(orderId, amount)
-);
-
-// With explicit input — useful when you want input audit in events later
-String ack = Workflow.activity("confirm", r, x -> notifier.send(x.transactionId()));
-
-// Side-effect only (Runnable)
-Workflow.activity("audit", () -> auditLog.record(orderId));
-
-// Short forms use ActivityOptions.defaultOptions()
-String s = Workflow.activity("simple", () -> svc.doSomething());
-```
-
-- No interface required — call any Spring bean (or lambda) directly
-- Activity name is **whatever string you pass** — uniqueness within a workflow is **your responsibility**
-- Return type is captured at runtime via `result.getClass()`. On replay the engine uses `activity_results.result_type` to deserialize back without a `Class<T>` token
-
-Both styles can be mixed in the same workflow. They share the same cache, retry, timeout, and event semantics — they both delegate to `ActivityExecutor`.
-
-> **Activity names must be unique within a workflow.** Two calls with the same name (and same workflow) collide on the cache key.
+- **Активности должны быть идемпотентны.** Если процесс умрёт прямо во время активности, при следующем заходе она выполнится снова. Используйте ключи запроса, `INSERT … ON CONFLICT` и т.п.
+- **Имена активностей уникальны в пределах workflow** — это ключ кэша результата.
+- **Не меняйте порядок/имена активностей** в уже запущенных workflow без `getVersion` — иначе сломаете воспроизведение.
+- **Делайте входы и результаты сериализуемыми в JSON** — они проходят через Jackson и колонки JSONB.
 
 ---
 
-## Retry policies
+## Конфигурация
 
-```java
-RetryPolicy.defaultPolicy();                  // maxAttempts=3, initialInterval=1s, backoff=2.0
+Все настройки — под префиксом `workflow.*`.
 
-RetryPolicy.newBuilder()
-    .setMaxAttempts(5)
-    .setInitialInterval(Duration.ofSeconds(2))
-    .setBackoffCoefficient(2.0)              // delay = initial * (backoff ^ attempt)
-    .addNoRetry(IllegalArgumentException.class)
-    .addNoRetry(SomeBusinessException.class)
-    .build();
-```
-
-`maxAttempts` is the **total** number of attempts (initial + retries). Setting `1` = fail-fast.
-
-On failure:
-- If the exception is a `NonRetryableException` or matches any `addNoRetry(...)` class → activity is marked `DEAD`, workflow transitions to `FAILED`. No retry.
-- Else if `attempt < maxAttempts` → row inserted into `retries(fire_at = now + initialInterval × backoff^attempt)`. `RetryScheduler` will pick it up later and create a fresh `tasks` row.
-- Else (attempts exhausted) → activity `DEAD`, workflow `FAILED`.
-
----
-
-## Workflow lifecycle & states
-
-```
-              startWorkflow()
-       ┌────────────────────┐
-       ▼                    │
-   PENDING ──── worker picks up ────┐
-                                    ▼
-                                 RUNNING ────────┐
-                                    │            │
-                                    │ success    │ unexpected exception /
-                                    ▼            ▼ non-retryable / attempts exhausted
-                                COMPLETED      FAILED
-```
-
-| State | Persisted | Meaning |
+| Свойство | По умолчанию | Назначение |
 |---|---|---|
-| `PENDING` | yes | created, in queue, never executed (transient, usually <2s) |
-| `RUNNING` | yes | currently executing on some node, **or** sitting between retry attempts (the in-flight detail is in `retries.fire_at`) |
-| `COMPLETED` | yes | terminal — workflow returned normally |
-| `FAILED` | yes | terminal — non-retryable error or retries exhausted |
-
-There is **no separate "RETRYING" state** in the database. Between attempts, the workflow stays in `RUNNING` and the `retries` row carries the schedule. UI can derive "waiting for retry" from `tasks` having no `PROCESSING` row + an open `retries` row.
-
-**Currently-executing right now (per node):**
-
-```sql
-SELECT t.workflow_id, t.locked_by AS node_id, t.locked_at, t.locked_until
-FROM tasks t
-WHERE t.status = 'PROCESSING' AND t.locked_until > now();
-```
-
-Each instance writes its `instance.id` to `tasks.locked_by` when claiming work. This is the source of truth for "what's running where" across the cluster.
+| `workflow.worker-pool-size` | `4` | сколько потоков обрабатывают задачи |
+| `workflow.poll-interval-ms` | `1000` | как часто воркер опрашивает очередь задач |
+| `workflow.lock-timeout-seconds` | `60` | на сколько задача блокируется за воркером; после — считается «зависшей» (если аренда не продлевается) |
+| `workflow.lease-renew-interval-ms` | `20000` | как часто воркер продлевает аренду своих задач; должно быть заметно меньше `lock-timeout-seconds`×1000 |
+| `workflow.retry-poll-interval-ms` | `2000` | как часто проверяются назревшие повторы |
+| `workflow.timeout-watcher-interval-ms` | `5000` | как часто ищутся зависшие задачи |
+| `workflow.instance.id` | `default` | уникальный ID реплики (см. multi-instance) |
+| `workflow.instance.internal-url` | _(пусто)_ | внутренний URL реплики |
+| `workflow.instance.external-url` | _(пусто)_ | публичный URL; **его наличие включает multi-instance-режим** |
 
 ---
 
-## Signals
+## Несколько реплик (multi-instance)
 
-External code can send named signals to a running workflow; workflows can block waiting for them.
+Можно запустить любое число копий приложения против одной базы — они делят общую очередь задач. Двойное выполнение исключено на уровне БД: задачи разбираются через `SELECT … FOR UPDATE SKIP LOCKED`, так что одну задачу заберёт ровно одна реплика.
 
-```java
-// Inside a workflow
-Object payload = Workflow.waitForSignal("approval", Duration.ofMinutes(10));
-if (payload == null) {
-    throw new NonRetryableException("Approval timeout");
-}
-
-// From elsewhere (e.g. a REST controller)
-@Autowired SignalBus signalBus;
-signalBus.send(workflowId, "approval", Map.of("by", "manager-42"));
-```
-
-Signals are persisted in the `signals` table. Delivery is at-least-once-then-consumed: `await` claims the first unconsumed row via `FOR UPDATE SKIP LOCKED` and marks it `consumed = true`.
-
-> **Note:** the current `await` implementation polls every 500 ms while a worker thread is blocked. For long waits (hours, days), this is fine — Postgres load is negligible — but it does keep a worker slot occupied. Consider sizing `worker-pool-size` accordingly if many workflows wait simultaneously.
-
----
-
-## Multi-instance deployment
-
-Run any number of replicas against the same Postgres. They share the same task queue. Duplicate execution is prevented at the database level via `SELECT … FOR UPDATE SKIP LOCKED`.
-
-### How it works
-
-```
-┌────────────┐   poll every Nms      ┌─────────────────────────────────┐
-│ Instance 1│ ────────────────────► │            tasks                │
-│            │   FOR UPDATE SKIP    │  id  status  locked_by ...      │
-│            │   LOCKED LIMIT N     └─────────────────────────────────┘
-└────────────┘                                ▲
-                                              │ locked_by = node-2
-┌────────────┐   poll every Nms              │ (other instance won this row)
-│ Instance 2│ ──────────────────────────────┘
-└────────────┘
-```
-
-Each worker loop does this in one transaction:
-
-1. `SELECT * FROM tasks WHERE status='PENDING' AND scheduled_at<=now() ORDER BY scheduled_at LIMIT N FOR UPDATE SKIP LOCKED`
-2. For each returned row: set `status='PROCESSING'`, `locked_by=<this instance id>`, `locked_at=now()`, `locked_until=now()+lockTimeout`
-3. Commit
-
-Rows locked by another instance's transaction are silently skipped (that's what `SKIP LOCKED` does). After commit, the worker hands the task to its thread pool and processes it without holding the row lock.
-
-If a worker dies mid-processing, the row stays in `PROCESSING` with a stale `locked_until`. The `TimeoutWatcher` (`@Scheduled`, default 5 s) resets such rows back to `PENDING` so any node can pick them up again.
-
-### Setup
-
-In each replica's config:
+В конфиге каждой реплики задайте уникальный ID и адреса:
 
 ```properties
 workflow.instance.id=node-1
@@ -398,174 +505,147 @@ workflow.instance.internal-url=http://app1:8080
 workflow.instance.external-url=https://api.example.com/node-1
 ```
 
-- `id` must be unique per replica. PK in `instance_registry`, value of `tasks.locked_by`.
-- `internal-url` — address other nodes can reach this one in the private network (e.g. docker service name, k8s service). Currently informational; stored in the registry and exposed to the UI for topology display.
-- `external-url` — public address the browser-side UI calls. **Required to enable multi-instance mode.**
+- `id` должен быть уникален на каждую реплику;
+- `external-url` — публичный адрес, по которому UI обращается к ноде; **его наличие включает multi-instance-режим**;
+- если `external-url` пуст (по умолчанию) — нода работает в одиночном режиме, без регистрации.
 
-Validation on startup (fail-fast):
-- `external-url` set + `id == "default"` → exception
-- `external-url` set + `internal-url` missing → exception
+### Регистрация нод
 
-If `external-url` is empty (default), the node runs in **single-instance mode**: no registry rows, no heartbeats, and `/workflow/api/cluster/nodes` returns `{ "nodes": [] }`.
+В multi-instance-режиме каждая нода регистрирует себя в таблице `wflow.instance_registry`:
 
-### Heartbeat
+- при старте — пишет туда строку со своим `id`, `internal_url`, `external_url`;
+- каждые 10 секунд — обновляет `last_heartbeat` (heartbeat), чтобы остальные знали, что она жива;
+- нода считается живой, если её `last_heartbeat` обновлялся в последние 30 секунд.
 
-When multi-instance is enabled:
+Именно из этой таблицы берётся список нод для эндпоинта `/workflow/api/cluster/nodes` и для топологии в UI. В одиночном режиме (без `external-url`) строки не пишутся и список нод пустой.
 
-- `@PostConstruct`: UPSERT into `instance_registry` (id, internal_url, external_url, last_heartbeat=now)
-- `@Scheduled(fixedDelay=10s)`: UPDATE `last_heartbeat=now()`
-- `@PreDestroy`: DELETE the row
-- A node is considered live when `last_heartbeat > now() - 30s`
+### Аренда задач, продление и фенсинг
 
-### Browser-side fan-out (no server-side aggregator)
+Чтобы две ноды не выполняли одну задачу одновременно, каждая задача захватывается **в аренду**:
 
-The engine does **not** fan out HTTP between nodes to build a global cluster view. Instead, the UI gets the list of nodes from any single instance and queries each node's `external-url` directly.
+- при захвате нода ставит `locked_until = now + lock-timeout-seconds` и уникальный `lock_token`;
+- пока нода жива и обрабатывает задачу, она **продлевает аренду** каждые `lease-renew-interval-ms` (двигает `locked_until` вперёд). Поэтому медленная, но живая обработка **никогда** не считается зависшей;
+- если нода реально умерла (или надолго зависла) и перестала продлевать, `locked_until` уходит в прошлое — `TimeoutWatcher` возвращает задачу в очередь, и её забирает другая нода с новым токеном.
 
-```
-Browser → GET https://nodeA/workflow/api/cluster/nodes
-        ← { self: "node-A", nodes:[
-              {id:"node-A", externalUrl:"https://nodeA/..."},
-              {id:"node-B", externalUrl:"https://nodeB/..."},
-              {id:"node-C", externalUrl:"https://nodeC/..."} ]}
+Если протухшая нода всё-таки «оживёт» и попробует дописать состояние по уже отобранной задаче, сработает **фенсинг**: перед каждой записью (события, статус workflow, результаты update) проверяется, что токен ещё наш. Если задачу уже забрали — запись отклоняется (`LockLostException`), текущий «ход» отбрасывается целиком, а владельцем остаётся новая нода. Финализация задачи тоже условная: статус проставляется только если токен совпадает.
 
-Browser → GET https://nodeA/workflow/api/cluster/local
-Browser → GET https://nodeB/workflow/api/cluster/local
-Browser → GET https://nodeC/workflow/api/cluster/local
-        ← per-node { pool, running:[ ... ] }
-```
+Дополнительно, когда нода обнаруживает потерю аренды, она **прерывает свой рабочий поток** (`interrupt`), чтобы пораньше освободить слот — но это лишь оптимизация: корректность держится на фенсинге, а не на прерывании.
 
-This avoids node-to-node HTTP, timeouts, and one-bad-node-poisons-everyone. If a node is unreachable from the browser, the UI marks it offline; the list of nodes itself still comes from the registry.
-
-`/workflow/api/cluster/*` endpoints are annotated `@CrossOrigin(origins = "*")` to allow the UI loaded from one node to fetch state from peers.
+> Практический вывод тот же: **активности должны быть идемпотентны.** Фенсинг защищает записи движка, но если две копии хода успели вызвать одну и ту же ещё-не-записанную активность, тело активности выполнится дважды.
 
 ---
 
-## Cluster REST API
+## REST API и UI
 
-| Method | Path | Description |
+Все эндпоинты — под `/workflow/api/...`, открыты для CORS (`*`), чтобы UI с одной ноды мог ходить на другие.
+
+**Просмотр workflow:**
+
+| Метод | Путь | Что делает |
 |---|---|---|
-| `GET` | `/workflow/api/cluster/nodes` | List of live nodes from `instance_registry` (`last_heartbeat > now − 30 s`). Always present; returns empty list in single-instance mode. |
-| `GET` | `/workflow/api/cluster/local` | This node's pool snapshot (active / queue / max) and its currently-running tasks (`SELECT * FROM tasks WHERE locked_by=<self> AND status='PROCESSING'`). |
+| `GET` | `/workflow/api/workflows` | список с фильтрами (`status`, `type`, `id`, `from`, `to`, `page`, `size`, `sort`) |
+| `GET` | `/workflow/api/workflows/types` | список зарегистрированных типов |
+| `GET` | `/workflow/api/workflows/{id}` | детали одного workflow |
+| `GET` | `/workflow/api/workflows/{id}/events` | история событий (таймлайн) |
+| `GET` | `/workflow/api/workflows/{id}/pending-activities` | активности в ожидании/повторе |
 
-### Sample responses
+**Управление** (signal/query/update/cancel/resume/retry) — см. таблицу в разделе [Запуск и управление](#запуск-и-управление-workflow).
 
-```http
-GET /workflow/api/cluster/nodes
-```
-```json
-{
-  "self": "node-1",
-  "nodes": [
-    {
-      "id": "node-1",
-      "internalUrl": "http://app1:8080",
-      "externalUrl": "https://api.example.com/node-1",
-      "lastHeartbeat": "2026-05-17T10:42:01Z",
-      "self": true
-    },
-    {
-      "id": "node-2",
-      "internalUrl": "http://app2:8080",
-      "externalUrl": "https://api.example.com/node-2",
-      "lastHeartbeat": "2026-05-17T10:41:55Z",
-      "self": false
-    }
-  ]
-}
-```
+**Кластер:**
 
-```http
-GET /workflow/api/cluster/local
-```
-```json
-{
-  "nodeId": "node-1",
-  "pool": { "active": 3, "queue": 7, "max": 8 },
-  "running": [
-    {
-      "taskId": "2a3b4c...",
-      "workflowId": "9f8e7d...",
-      "lockedAt": "2026-05-17T10:41:50Z",
-      "lockedUntil": "2026-05-17T10:42:50Z"
-    }
-  ]
-}
-```
-
----
-
-## Configuration reference
-
-| Property | Default | Purpose |
+| Метод | Путь | Что делает |
 |---|---|---|
-| `workflow.worker-pool-size` | `4` | Number of worker threads processing tasks |
-| `workflow.poll-interval-ms` | `1000` | Worker loop poll interval |
-| `workflow.lock-timeout-seconds` | `60` | `locked_until = locked_at + this`. After this expires, TimeoutWatcher resets the task |
-| `workflow.retry-poll-interval-ms` | `2000` | RetryScheduler poll interval — how often `retries` is scanned for due retries |
-| `workflow.timeout-watcher-interval-ms` | `5000` | TimeoutWatcher poll interval |
-| `workflow.instance.id` | `default` | Unique node ID. **Must be set when multi-instance.** |
-| `workflow.instance.internal-url` | _(unset)_ | Internal network URL (private DNS, docker service name). Required when `external-url` is set. |
-| `workflow.instance.external-url` | _(unset)_ | Public URL for browser-side UI access. Enables multi-instance mode when set. |
+| `GET` | `/workflow/api/cluster/nodes` | живые ноды из реестра (heartbeat за последние 30 с) |
+| `GET` | `/workflow/api/cluster/local` | состояние пула этой ноды и её текущие задачи |
 
----
+**Динамическая настройка активностей** (переопределить таймаут/повторы без передеплоя):
 
-## Database schema
-
-The engine owns 7 tables in the **`public` schema** (no dedicated schema). Flyway runs them on startup.
-
-| Table | Purpose |
+| Метод | Путь |
 |---|---|
-| `workflows` | One row per workflow run. `input`, `result` are JSONB. Holds final outcome. |
-| `tasks` | The work queue. One row per scheduled execution attempt. `FOR UPDATE SKIP LOCKED` is the heart of distribution. |
-| `activity_results` | Replay cache, one row per `(workflow_id, activity_name)`. Updated in place across retries (so live table stays slim). `result_type` stores the runtime class for type-safe replay. |
-| `retries` | Pending retries with `fire_at` schedule. `RetryScheduler` reads, inserts `tasks` rows, marks `processed=true`. |
-| `events` | Append-only audit log — `WORKFLOW_STARTED`/`COMPLETED`/`FAILED`, `ACTIVITY_STARTED`/`COMPLETED`/`FAILED`/`RETRYING`. **Not** the source of truth for replay; `activity_results` is. Used by UI / debugging / metrics. |
-| `signals` | Inbox for `Workflow.waitForSignal(...)`. Polled by waiting workflows; consumed signals are marked `consumed=true`. |
-| `instance_registry` | Heartbeat table for multi-instance discovery. Only populated when `workflow.instance.external-url` is set. |
+| `GET` / `PUT` / `DELETE` | `/workflow/api/activity-overrides/{activityName}` |
 
-Flyway migrations:
+**Веб-интерфейс** доступен по адресу `/workflow/ui/` (нужен `spring-boot-starter-web`).
+
+---
+
+## Как это устроено внутри (архитектура)
+
+Этот блок — «для интереса». Чтобы пользоваться temporal-lite, его читать необязательно.
+
+Идея простая: **очередь задач в Postgres + проигрывание истории.**
+
+**1. Очередь задач.**
+Когда вы зовёте `startWorkflow(...)`, в таблицу `wflow.workflows` пишется сам workflow, а в `wflow.tasks` — задача «выполнить его». Воркер в фоне (`@Scheduled`) забирает пачку задач запросом `SELECT … FOR UPDATE SKIP LOCKED`, помечает их за собой и раздаёт по потокам пула. `SKIP LOCKED` — это то, что позволяет нескольким репликам безопасно тянуть из одной таблицы, не мешая друг другу.
+
+**2. История событий.**
+Всё, что делает workflow — вызвал активность, заснул, получил сигнал, записал side effect — пишется в таблицу `wflow.events` как событие. Эта таблица — **единственный источник правды**. Состояние самого workflow в памяти не хранится.
+
+**3. Проигрывание (replay).**
+Когда воркер берёт workflow, он не помнит, что было раньше — он просто **запускает метод workflow с начала** и проигрывает его поверх истории. Дошли до активности, которая уже выполнялась? Движок не зовёт её снова — возвращает сохранённый результат из истории. Дошли до новой активности — выполняет и дописывает событие. Так каждая успешная активность выполняется не больше одного раза, даже после рестартов.
+
+**4. Паузы.**
+Когда workflow зовёт `sleep` или `await`, он не блокирует поток — он бросает специальное «парковочное» исключение. Воркер ловит его, освобождает поток и записывает, когда workflow надо разбудить (таблицы `pending_timers` / `pending_awaits`). Отдельный планировщик в нужный момент снова кладёт задачу в очередь — и проигрывание продолжается с того же места.
+
+**5. Повторы и зависшие задачи.**
+Упавшие активности планируются на повтор в `wflow.retries`. Отдельный шедулер вытаскивает назревшие повторы обратно в очередь. Пока воркер жив, он продлевает аренду своих задач (`lock_token` + `locked_until`); если перестал — сторож (`TimeoutWatcher`) возвращает задачу в очередь, а опоздавшие записи старого воркера отсекаются фенсингом по токену. Подробнее — в разделе [Аренда задач, продление и фенсинг](#аренда-задач-продление-и-фенсинг).
+
+Схематично:
 
 ```
-V1__workflows.sql
-V2__tasks.sql
-V3__events.sql
-V4__activity_results.sql
-V5__retries.sql
-V6__signals.sql
-V7__activity_result_type.sql      ← adds activity_results.result_type
-V8__tasks_locked_at.sql            ← adds tasks.locked_at
-V9__instance_registry.sql          ← instance registry table
+startWorkflow ──► wflow.workflows + wflow.tasks (одна транзакция)
+
+       Воркер (@Scheduled)
+          │  SELECT … FOR UPDATE SKIP LOCKED  ← так реплики делят очередь
+          ▼
+   запускает метод workflow с начала
+          │
+          ├─ активность уже в истории?  → вернуть сохранённый результат
+          ├─ новая активность?          → выполнить, записать событие
+          ├─ ошибка?                     → запланировать повтор (retries)
+          └─ sleep / await?             → припарковать, освободить поток
+          │
+          ▼
+   обновить статус workflow, дописать события
+                                   │
+                                   ▼
+                            ┌──────────────┐
+                            │  PostgreSQL  │  схема wflow:
+                            │              │  workflows, tasks, events,
+                            │              │  retries, signals,
+                            │              │  pending_timers/awaits,
+                            │              │  update_requests,
+                            │              │  instance_registry
+                            └──────────────┘
 ```
 
-Notable indexes (all created by the migrations):
+Таблицы схемы `wflow`:
 
-- `idx_tasks_poll (status, scheduled_at) WHERE status='PENDING'` — drives the worker poll
-- `idx_events_workflow (workflow_id, created_at)` — for UI timeline queries
-- `idx_retries_fire (fire_at) WHERE processed=false` — drives RetryScheduler
-- `idx_signals_lookup (workflow_id, signal_name, consumed)`
-- `idx_instance_registry_heartbeat (last_heartbeat)`
+| Таблица | Зачем |
+|---|---|
+| `workflows` | по одной строке на workflow: вход, результат, статус |
+| `tasks` | очередь работы; сердце распределения — `FOR UPDATE SKIP LOCKED` |
+| `events` | история — источник правды для проигрывания |
+| `retries` | запланированные повторы активностей |
+| `signals` | входящие сигналы |
+| `pending_timers` / `pending_awaits` | когда разбудить припаркованный workflow |
+| `update_requests` | запросы update и их результаты |
+| `instance_registry` | реестр живых реплик (heartbeat) |
 
 ---
 
 ## FAQ
 
-**What happens on JVM crash mid-activity?**
-The `activity_results` row is only written **after** the activity body returns or throws — so if the JVM dies inside `payment.charge(...)`, no row exists. The next time a worker picks up the workflow, that activity gets re-executed. Make sure activity bodies are idempotent (request-id headers, INSERT … ON CONFLICT, etc.).
+**Что будет, если JVM упадёт посреди активности?**
+Результат активности пишется в историю только **после** того, как её тело вернуло значение. Если процесс умер в середине — записи нет, и при следующем заходе активность выполнится заново. Поэтому делайте тела активностей идемпотентными.
 
-**Can two replicas execute the same workflow at the same time?**
-No. `FOR UPDATE SKIP LOCKED` ensures only one replica wins the lock on a given `tasks` row. Other replicas see the row as locked and skip it. The lock is released only when the worker commits the claim transaction; after that the worker processes the task without holding the row.
+**Могут ли две реплики выполнять один и тот же workflow одновременно?**
+Нет. `FOR UPDATE SKIP LOCKED` гарантирует, что задачу заберёт ровно одна реплика; остальные её пропустят.
 
-**Do I have to use `@Activity` interfaces? Can I just call methods?**
-You have two options. Typed interfaces (`@Activity` + `Workflow.newActivityStub`) give you type safety and auto-naming. Or use `Workflow.activity(name, options, () -> ...)` and pass any lambda. Same engine semantics, different ergonomics.
+**Почему активность выполняется в том же потоке, что и workflow?**
+Ради простоты. В «большом» Temporal worker workflow освобождается, пока активность крутится на другом worker'е. Здесь активность выполняется синхронно (с таймаутом через `CompletableFuture`). Для коротких и средних активностей это проще и быстрее; для очень долгих — учитывайте, что слот в пуле занят всё это время, и подбирайте `worker-pool-size`.
 
-**Why is the workflow execution synchronous? In real Temporal, the workflow worker is freed up while the activity runs.**
-This engine is designed to be lightweight. Activities run in the same worker thread as the workflow (with a `CompletableFuture` wrapper for timeout enforcement). For short-to-medium activities (seconds, minutes) this is simpler and faster — no replay round-trip per step. For very long activities (hours) the worker slot is held for that whole time; consider sizing the pool accordingly or splitting the long step.
+**Нужно ли обязательно делать `@Activity`-интерфейсы?**
+Нет. Либо типизированные стабы (`@Activity` + `Workflow.newActivityStub`), либо функциональный API `Workflow.activity(name, options, () -> ...)`. Семантика одна, отличается только удобство.
 
-**Do events drive replay?**
-No. **`activity_results` is the source of truth for replay.** `events` is an append-only audit log for UI and debugging.
-
-**Does the engine support workflow versioning?**
-Not built-in. If you change the activity order in a workflow that's already running, the cache lookup by activity_name may return stale results. For breaking changes: rename the workflow type, or restart-from-activity (purge cached rows and re-execute).
-
-**Where is the UI?**
-The Java backend is rebuilt. The previous React SPA is being adapted to the new schema and will be wired in via `web/controller/*` REST endpoints — currently only the cluster endpoints are in place. See `web/dto/*` for the shape of data the UI will consume.
+**Поддерживается ли версионирование?**
+Да, через `Workflow.getVersion(...)` — для безопасного изменения логики уже запущенных workflow. Для несовместимых изменений проще завести новый тип workflow (`@WorkflowComponent("...-v2")`).
