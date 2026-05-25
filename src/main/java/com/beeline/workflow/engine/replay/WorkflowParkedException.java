@@ -1,14 +1,18 @@
 package com.beeline.workflow.engine.replay;
 
 /**
- * Thrown by {@code Workflow.sleep}, {@code Workflow.await}, and other suspending commands
- * to signal "this turn is over, please commit and re-schedule a wake-up". Not an error —
- * the {@link com.beeline.workflow.engine.executor.WorkflowExecutor} catches it as a normal
- * termination of a decision turn.
+ * Thrown by {@code Workflow.sleep}, {@code Workflow.await}, activity scheduling, and other
+ * suspending commands to signal "this turn is over, please commit and re-schedule a wake-up".
+ * Not an error — the {@link com.beeline.workflow.engine.executor.WorkflowExecutor} catches it
+ * as a normal termination of a decision turn.
+ *
+ * <p>{@code ACTIVITY} is thrown after the workflow thread has scheduled an activity Task: the
+ * activity now runs on a separate worker thread, and the workflow resumes (via replay) once the
+ * activity records its outcome and enqueues a wakeup.
  */
 public class WorkflowParkedException extends RuntimeException {
 
-    public enum Kind { TIMER, AWAIT }
+    public enum Kind { TIMER, AWAIT, ACTIVITY }
 
     private final Kind kind;
     private final int seq;

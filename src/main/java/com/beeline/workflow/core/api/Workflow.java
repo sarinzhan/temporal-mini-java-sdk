@@ -3,7 +3,6 @@ package com.beeline.workflow.core.api;
 import com.beeline.workflow.core.config.ActivityOptions;
 import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
-import com.beeline.workflow.engine.executor.ActivityExecutor;
 import com.beeline.workflow.engine.replay.CommandType;
 import com.beeline.workflow.engine.replay.EventSink;
 import com.beeline.workflow.engine.replay.HistoryCursor;
@@ -42,38 +41,49 @@ public final class Workflow {
         return ActivityStubFactory.createStub(activityInterface, options);
     }
 
-    // ── Functional activity API ─────────────────────────────────────────────
+    // ── Functional activity API (removed) ────────────────────────────────────
+    //
+    // Activities now run on a separate worker thread as durable 'activity' tasks: the workflow
+    // thread records the call (interface + method + serialized args) and parks. An opaque
+    // Supplier/Function/Runnable closure cannot be persisted to a task and re-run on another
+    // thread/node, so the inline functional API is no longer supported. Use a typed activity stub
+    // instead:
+    //
+    //     MyActivities acts = Workflow.newActivityStub(MyActivities.class, options);
+    //     var result = acts.doWork(arg);
+    //
+    // The overloads are retained so existing call sites fail fast with a clear message rather than
+    // silently disappearing from the API.
 
     public static <T> T activity(String name, Supplier<T> fn) {
-        return activity(name, ActivityOptions.defaultOptions(), fn);
+        throw functionalActivityRemoved(name);
     }
 
-    @SuppressWarnings("unchecked")
     public static <T> T activity(String name, ActivityOptions options, Supplier<T> fn) {
-        WorkflowContextHolder.require();
-        ActivityExecutor executor = ActivityStubFactory.requireExecutor();
-        return (T) executor.execute(name, options, null, fn::get);
+        throw functionalActivityRemoved(name);
     }
 
     public static <I, O> O activity(String name, I input, Function<I, O> fn) {
-        return activity(name, ActivityOptions.defaultOptions(), input, fn);
+        throw functionalActivityRemoved(name);
     }
 
-    @SuppressWarnings("unchecked")
     public static <I, O> O activity(String name, ActivityOptions options, I input, Function<I, O> fn) {
-        WorkflowContextHolder.require();
-        ActivityExecutor executor = ActivityStubFactory.requireExecutor();
-        return (O) executor.execute(name, options, null, () -> fn.apply(input));
+        throw functionalActivityRemoved(name);
     }
 
     public static void activity(String name, Runnable fn) {
-        activity(name, ActivityOptions.defaultOptions(), fn);
+        throw functionalActivityRemoved(name);
     }
 
     public static void activity(String name, ActivityOptions options, Runnable fn) {
-        WorkflowContextHolder.require();
-        ActivityExecutor executor = ActivityStubFactory.requireExecutor();
-        executor.execute(name, options, void.class, () -> { fn.run(); return null; });
+        throw functionalActivityRemoved(name);
+    }
+
+    private static UnsupportedOperationException functionalActivityRemoved(String name) {
+        return new UnsupportedOperationException(
+                "Functional Workflow.activity(\"" + name + "\", <lambda>) is no longer supported: activities "
+                + "run on a separate worker as durable tasks and a closure cannot be serialized. "
+                + "Use a typed stub: Workflow.newActivityStub(YourActivities.class[, options]).");
     }
 
     // ── Determinism helpers ─────────────────────────────────────────────────

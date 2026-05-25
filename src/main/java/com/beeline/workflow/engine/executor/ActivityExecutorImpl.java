@@ -4,18 +4,17 @@ import com.beeline.workflow.core.api.WorkflowContext;
 import com.beeline.workflow.core.config.ActivityOptions;
 import com.beeline.workflow.core.config.RetryPolicy;
 import com.beeline.workflow.core.exception.ActivityFailureException;
-import com.beeline.workflow.core.exception.ActivityTimeoutException;
-import com.beeline.workflow.core.exception.NonRetryableException;
 import com.beeline.workflow.core.model.Event;
 import com.beeline.workflow.core.model.EventType;
-import com.beeline.workflow.core.model.RetryRecord;
+import com.beeline.workflow.core.model.Task;
+import com.beeline.workflow.core.model.TaskStatus;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
-import com.beeline.workflow.engine.context.WorkflowContextImpl;
 import com.beeline.workflow.engine.replay.CommandType;
 import com.beeline.workflow.engine.replay.HistoryCursor;
 import com.beeline.workflow.engine.replay.QueryReplayBlockedException;
+import com.beeline.workflow.engine.replay.WorkflowParkedException;
 import com.beeline.workflow.persistence.repository.EventRepository;
-import com.beeline.workflow.persistence.repository.RetryRepository;
+import com.beeline.workflow.persistence.repository.TaskRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -24,26 +23,25 @@ import tools.jackson.databind.JavaType;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+import java.lang.reflect.Method;
 import java.lang.reflect.Type;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Optional;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.function.Supplier;
 
 /**
- * Event-sourced activity executor. On each invocation:
- *   1. Take the next seq from the workflow's {@link HistoryCursor}.
- *   2. If history contains ACTIVITY_COMPLETED / ACTIVITY_FAILED for that seq, return / re-throw it
- *      without running the activity again (replay).
- *   3. Otherwise, write ACTIVITY_SCHEDULED (if not already in history), execute the activity,
- *      and write ACTIVITY_COMPLETED on success or ACTIVITY_RETRY_SCHEDULED / ACTIVITY_FAILED on failure.
+ * Workflow-side activity executor. The activity is <b>not</b> run on the workflow thread.
+ * On each invocation, using the workflow's {@link HistoryCursor}:
+ *   1. Take the next seq.
+ *   2. If history already has ACTIVITY_COMPLETED for that seq, return the cached result (replay).
+ *   3. If history has a terminal ACTIVITY_FAILED, re-throw it (replay).
+ *   4. If an activity task is already in flight (ACTIVITY_SCHEDULED / ACTIVITY_STARTED), park.
+ *   5. Otherwise (first attempt, or ACTIVITY_RETRY_SCHEDULED ready for the next attempt), atomically
+ *      write ACTIVITY_SCHEDULED and create an {@code activity} {@link Task}, then park the workflow.
+ *
+ * The actual invocation happens later on a separate worker via {@link ActivityTaskExecutor}.
  */
 public class ActivityExecutorImpl implements ActivityExecutor {
 
@@ -53,41 +51,37 @@ public class ActivityExecutorImpl implements ActivityExecutor {
             EventType.ACTIVITY_COMPLETED, EventType.ACTIVITY_FAILED);
 
     private final EventRepository eventRepository;
-    private final RetryRepository retryRepository;
+    private final TaskRepository taskRepository;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
-    private final ExecutorService activityThreadPool;
     private final java.util.function.BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver;
 
     public ActivityExecutorImpl(EventRepository eventRepository,
-                                RetryRepository retryRepository,
+                                TaskRepository taskRepository,
                                 ObjectMapper objectMapper,
                                 PlatformTransactionManager transactionManager) {
-        this(eventRepository, retryRepository, objectMapper, transactionManager, (name, opts) -> opts);
+        this(eventRepository, taskRepository, objectMapper, transactionManager, (name, opts) -> opts);
     }
 
     public ActivityExecutorImpl(EventRepository eventRepository,
-                                RetryRepository retryRepository,
+                                TaskRepository taskRepository,
                                 ObjectMapper objectMapper,
                                 PlatformTransactionManager transactionManager,
                                 java.util.function.BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver) {
         this.eventRepository = eventRepository;
-        this.retryRepository = retryRepository;
+        this.taskRepository = taskRepository;
         this.objectMapper = objectMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.optionsResolver = optionsResolver;
-        this.activityThreadPool = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "wf-activity-timeout-" + System.nanoTime());
-            t.setDaemon(true);
-            return t;
-        });
     }
 
     @Override
     public Object execute(String activityName,
                           ActivityOptions options,
                           Type returnType,
-                          Supplier<Object> invocation) {
+                          Class<?> activityInterface,
+                          Method method,
+                          Object[] args) {
         WorkflowContext ctx = WorkflowContextHolder.require();
         Long workflowId = ctx.getWorkflowId();
         HistoryCursor cursor = ctx.getHistoryCursor();
@@ -98,22 +92,23 @@ public class ActivityExecutorImpl implements ActivityExecutor {
 
         int seq = cursor.nextSeq();
 
-        Optional<Event> terminal = cursor.findCompletion(seq, CommandType.ACTIVITY, ACTIVITY_TERMINAL);
-        if (terminal.isPresent()) {
-            Event e = terminal.get();
-            if (e.getEventType() == EventType.ACTIVITY_COMPLETED) {
-                log.debug("[{}/{}] activity replay-cached seq={}", workflowId, activityName, seq);
-                return deserializeResult(e.getPayload(), returnType);
-            }
-            // ACTIVITY_FAILED in history → check if a manual ACTIVITY_RETRY_SCHEDULED came after (admin override).
-            boolean forceRetry = cursor.findBySeqAndType(seq, EventType.ACTIVITY_RETRY_SCHEDULED).isPresent()
-                    && hasManualMarker(cursor, seq);
-            if (!forceRetry) {
-                String reason = e.getPayload() != null ? e.getPayload() : "activity failed";
-                throw new ActivityFailureException(activityName, attemptFromHistory(cursor, seq),
-                        reason, new RuntimeException(reason));
-            }
-            log.info("[{}/{}] manual force-retry — re-executing seq={}", workflowId, activityName, seq);
+        // Non-determinism guard: throws if a recorded event at this seq has a different command type
+        // (workflow code shape changed). We ignore the returned terminal and decide off the *latest*
+        // event instead, because a manual force-retry can record a fresh outcome after an earlier one.
+        cursor.findCompletion(seq, CommandType.ACTIVITY, ACTIVITY_TERMINAL);
+
+        Event latestEvent = cursor.latestEventForSeq(seq).orElse(null);
+        EventType latest = latestEvent != null ? latestEvent.getEventType() : null;
+
+        // Latest outcome wins. COMPLETED → replay the cached result; FAILED → surface to workflow code.
+        if (latest == EventType.ACTIVITY_COMPLETED) {
+            log.debug("[{}/{}] activity replay-cached seq={}", workflowId, activityName, seq);
+            return deserializeResult(latestEvent.getPayload(), returnType);
+        }
+        if (latest == EventType.ACTIVITY_FAILED) {
+            String reason = latestEvent.getPayload() != null ? latestEvent.getPayload() : "activity failed";
+            throw new ActivityFailureException(activityName, attemptFromHistory(cursor, seq),
+                    reason, new RuntimeException(reason));
         }
 
         if (cursor.isQueryMode()) {
@@ -121,103 +116,87 @@ public class ActivityExecutorImpl implements ActivityExecutor {
                     "activity " + activityName + " not yet recorded in history (seq=" + seq + ")");
         }
 
+        if (latest == EventType.ACTIVITY_SCHEDULED || latest == EventType.ACTIVITY_STARTED) {
+            // A task for this seq is already pending/running (e.g. the workflow woke for a signal while
+            // the activity worker is still busy). Don't create a duplicate — just park again.
+            log.debug("[{}/{}] activity already in flight seq={} — parking", workflowId, activityName, seq);
+            throw new WorkflowParkedException(WorkflowParkedException.Kind.ACTIVITY, seq);
+        }
+
+        // latest == null (never scheduled) or ACTIVITY_RETRY_SCHEDULED (backoff elapsed / force-retry):
+        // schedule a fresh attempt on a separate worker, then park this turn.
         int attempt = attemptFromHistory(cursor, seq) + 1;
-
-        if (cursor.findBySeqAndType(seq, EventType.ACTIVITY_SCHEDULED).isEmpty()) {
-            saveEvent(workflowId, EventType.ACTIVITY_SCHEDULED, seq, activityName,
-                    "{\"attempt\":" + attempt + "}");
-        }
-        saveEvent(workflowId, EventType.ACTIVITY_STARTED, seq, activityName,
-                "{\"attempt\":" + attempt + "}");
-
-        Object result;
-        Duration timeout = options.getStartToCloseTimeout();
-        try {
-            CompletableFuture<Object> future = CompletableFuture.supplyAsync(invocation, activityThreadPool);
-            if (timeout == null || timeout.isZero() || timeout.isNegative()) {
-                result = future.join();
-            } else {
-                result = future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-            }
-        } catch (TimeoutException te) {
-            return failOrRetry(workflowId, activityName, seq, attempt, options,
-                    new ActivityTimeoutException(activityName, timeout));
-        } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
-            return failOrRetry(workflowId, activityName, seq, attempt, options, cause);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            return failOrRetry(workflowId, activityName, seq, attempt, options, ie);
-        } catch (RuntimeException re) {
-            return failOrRetry(workflowId, activityName, seq, attempt, options, re);
-        }
-
-        String payload = buildCompletedPayload(result, attempt);
-        saveEvent(workflowId, EventType.ACTIVITY_COMPLETED, seq, activityName, payload);
-        log.info("[{}/{}] activity COMPLETED seq={} attempt={}", workflowId, activityName, seq, attempt);
-        return result;
+        scheduleActivityTask(workflowId, seq, activityName, options, activityInterface, method, args, attempt);
+        log.info("[{}/{}] activity scheduled seq={} attempt={} — parking workflow for async execution",
+                workflowId, activityName, seq, attempt);
+        throw new WorkflowParkedException(WorkflowParkedException.Kind.ACTIVITY, seq);
     }
 
-    private boolean hasManualMarker(HistoryCursor cursor, int seq) {
-        return cursor.findBySeqAndType(seq, EventType.ACTIVITY_RETRY_SCHEDULED)
-                .map(Event::getPayload)
-                .filter(p -> p != null && p.contains("\"manual\":true"))
-                .isPresent();
-    }
-
-    private int attemptFromHistory(HistoryCursor cursor, int seq) {
-        Optional<Event> sched = cursor.findBySeqAndType(seq, EventType.ACTIVITY_SCHEDULED);
-        Optional<Event> retry = cursor.findBySeqAndType(seq, EventType.ACTIVITY_RETRY_SCHEDULED);
-        int n = 0;
-        if (sched.isPresent()) n = extractInt(sched.get().getPayload(), "attempt", 1);
-        if (retry.isPresent()) n = Math.max(n, extractInt(retry.get().getPayload(), "attempt", n));
-        return n;
-    }
-
-    private Object failOrRetry(Long workflowId,
-                               String activityName,
-                               int seq,
-                               int attempt,
-                               ActivityOptions options,
-                               Throwable cause) {
+    /**
+     * Atomically record ACTIVITY_SCHEDULED and enqueue the {@code activity} task in one transaction,
+     * so a crash leaves either both (the worker will run it) or neither (the workflow reschedules) —
+     * never a scheduled marker without a task to run it.
+     */
+    private void scheduleActivityTask(Long workflowId,
+                                      int seq,
+                                      String activityName,
+                                      ActivityOptions options,
+                                      Class<?> activityInterface,
+                                      Method method,
+                                      Object[] args,
+                                      int attempt) {
         assertOwned();
-        RetryPolicy policy = options.getRetryPolicy() != null ? options.getRetryPolicy() : RetryPolicy.defaultPolicy();
-        boolean noRetry = cause instanceof NonRetryableException || policy.isNoRetry(cause);
-        boolean exhausted = attempt >= policy.getMaxAttempts();
-        boolean willRetry = !noRetry && !exhausted;
-        Instant fireAt = willRetry ? Instant.now().plus(policy.nextDelay(attempt)) : null;
+        String payloadJson = serializeTaskPayload(
+                buildPayload(seq, activityName, options, activityInterface, method, args, attempt), activityName);
 
-        if (willRetry) {
-            transactionTemplate.executeWithoutResult(s -> {
-                RetryRecord r = new RetryRecord();
-                r.setWorkflowId(workflowId);
-                r.setActivityName(activityName);
-                r.setAttempt(attempt);
-                r.setMaxAttempts(policy.getMaxAttempts());
-                r.setFireAt(fireAt);
-                r.setReason(safeMessage(cause));
-                r.setProcessed(false);
-                WorkflowContext ctx = WorkflowContextHolder.current();
-                if (ctx instanceof WorkflowContextImpl impl && impl.getCurrentTaskId() != null) {
-                    r.setTaskId(impl.getCurrentTaskId());
-                }
-                retryRepository.save(r);
-            });
-            String payload = "{\"attempt\":" + attempt + ",\"fireAt\":\"" + fireAt
-                    + "\",\"reason\":\"" + escapeJson(safeMessage(cause)) + "\"}";
-            saveEvent(workflowId, EventType.ACTIVITY_RETRY_SCHEDULED, seq, activityName, payload);
-            log.warn("[{}/{}] activity FAILED seq={} attempt={} — retrying at {}",
-                    workflowId, activityName, seq, attempt, fireAt);
-        } else {
-            String payload = "{\"attempt\":" + attempt
-                    + ",\"reason\":\"" + escapeJson(safeMessage(cause)) + "\""
-                    + ",\"terminal\":true}";
-            saveEvent(workflowId, EventType.ACTIVITY_FAILED, seq, activityName, payload);
-            log.error("[{}/{}] activity FAILED seq={} attempt={} — {}",
-                    workflowId, activityName, seq, attempt, noRetry ? "non-retryable" : "attempts exhausted");
+        transactionTemplate.executeWithoutResult(s -> {
+            Event scheduled = new Event();
+            scheduled.setWorkflowId(workflowId);
+            scheduled.setEventType(EventType.ACTIVITY_SCHEDULED);
+            scheduled.setCommandType(CommandType.ACTIVITY.name());
+            scheduled.setSeq(seq);
+            scheduled.setActivityName(activityName);
+            scheduled.setPayload("{\"attempt\":" + attempt + "}");
+            eventRepository.save(scheduled);
+
+            Task t = new Task();
+            t.setWorkflowId(workflowId);
+            t.setTaskType("activity");
+            t.setStatus(TaskStatus.PENDING);
+            t.setScheduledAt(Instant.now());
+            t.setPayload(payloadJson);
+            taskRepository.save(t);
+        });
+    }
+
+    private ActivityTaskPayload buildPayload(int seq,
+                                             String activityName,
+                                             ActivityOptions options,
+                                             Class<?> activityInterface,
+                                             Method method,
+                                             Object[] args,
+                                             int attempt) {
+        List<String> paramTypes = Arrays.stream(method.getParameterTypes()).map(Class::getName).toList();
+        Duration timeout = options.getStartToCloseTimeout();
+        long timeoutMs = (timeout != null && !timeout.isNegative()) ? timeout.toMillis() : 0L;
+        RetryPolicy rp = options.getRetryPolicy() != null ? options.getRetryPolicy() : RetryPolicy.defaultPolicy();
+        List<String> noRetryOn = rp.getNoRetryOn().stream().map(Class::getName).toList();
+        ActivityTaskPayload.RetryPolicyPayload retry = new ActivityTaskPayload.RetryPolicyPayload(
+                rp.getMaxAttempts(),
+                rp.getInitialInterval().toMillis(),
+                rp.getMaxInterval().toMillis(),
+                rp.getBackoffCoefficient(),
+                noRetryOn);
+        return new ActivityTaskPayload(seq, activityName, activityInterface.getName(), method.getName(),
+                paramTypes, args != null ? args : new Object[0], attempt, timeoutMs, retry);
+    }
+
+    private String serializeTaskPayload(ActivityTaskPayload payload, String activityName) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize activity task payload for " + activityName, e);
         }
-
-        throw new ActivityFailureException(activityName, attempt, safeMessage(cause), cause);
     }
 
     /** Fence: refuse to write if the workflow's task lease was lost to another node. */
@@ -226,31 +205,20 @@ public class ActivityExecutorImpl implements ActivityExecutor {
         if (c != null) c.getTaskLease().assertOwned();
     }
 
-    private void saveEvent(Long workflowId, EventType type, int seq, String activityName, String payload) {
-        assertOwned();
-        transactionTemplate.executeWithoutResult(s -> {
-            Event e = new Event();
-            e.setWorkflowId(workflowId);
-            e.setEventType(type);
-            e.setCommandType(CommandType.ACTIVITY.name());
-            e.setSeq(seq);
-            e.setActivityName(activityName);
-            e.setPayload(payload);
-            eventRepository.save(e);
-        });
-    }
-
-    private String buildCompletedPayload(Object result, int attempt) {
-        try {
-            String resultJson = result == null ? "null" : objectMapper.writeValueAsString(result);
-            String runtimeType = result != null ? result.getClass().getName() : null;
-            return "{\"attempt\":" + attempt
-                    + ",\"result\":" + resultJson
-                    + (runtimeType != null ? ",\"resultType\":\"" + runtimeType + "\"" : "")
-                    + "}";
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to serialize activity result", e);
+    /**
+     * Highest attempt number recorded for this seq. Each attempt writes its own ACTIVITY_SCHEDULED
+     * (and, on failure, ACTIVITY_RETRY_SCHEDULED), so we must take the max across all of them — not
+     * the first — or retries would never advance past attempt 2.
+     */
+    private int attemptFromHistory(HistoryCursor cursor, int seq) {
+        int n = 0;
+        for (Event e : cursor.eventsForSeq(seq)) {
+            if (e.getEventType() == EventType.ACTIVITY_SCHEDULED
+                    || e.getEventType() == EventType.ACTIVITY_RETRY_SCHEDULED) {
+                n = Math.max(n, extractInt(e.getPayload(), "attempt", n));
+            }
         }
+        return n;
     }
 
     private Object deserializeResult(String payload, Type returnType) {
@@ -291,14 +259,5 @@ public class ActivityExecutorImpl implements ActivityExecutor {
         } catch (Exception e) {
             return defaultValue;
         }
-    }
-
-    private static String safeMessage(Throwable t) {
-        return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
-    }
-
-    private static String escapeJson(String v) {
-        if (v == null) return "";
-        return v.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

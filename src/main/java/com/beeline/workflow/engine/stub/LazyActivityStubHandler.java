@@ -6,7 +6,6 @@ import com.beeline.workflow.engine.executor.ActivityExecutor;
 import com.beeline.workflow.registry.ActivityRegistry;
 
 import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Type;
 
@@ -40,18 +39,12 @@ public class LazyActivityStubHandler<T> implements InvocationHandler {
         String activityName = buildActivityName(method);
         Type returnType = method.getGenericReturnType();
 
-        return executor.execute(activityName, options, returnType, () -> {
-            try {
-                return method.invoke(bean, args);
-            } catch (InvocationTargetException ite) {
-                Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
-                if (cause instanceof RuntimeException re) throw re;
-                if (cause instanceof Error err) throw err;
-                throw new RuntimeException(cause);
-            } catch (IllegalAccessException iae) {
-                throw new RuntimeException(iae);
-            }
-        });
+        // The activity does not run here. The executor records ACTIVITY_SCHEDULED, creates an
+        // 'activity' Task carrying the interface/method/args, and parks the workflow; a worker
+        // resolves and runs it on a separate thread. We pass the resolution metadata + args so the
+        // call can be reconstructed durably from the task payload.
+        Object[] callArgs = args != null ? args : new Object[0];
+        return executor.execute(activityName, options, returnType, activityInterface, method, callArgs);
     }
 
     private String buildActivityName(Method method) {

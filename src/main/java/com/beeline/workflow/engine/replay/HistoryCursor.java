@@ -83,6 +83,29 @@ public final class HistoryCursor {
         return Optional.ofNullable(terminal);
     }
 
+    /**
+     * The most recent event recorded for this seq (history is ordered by id ascending, so the
+     * last match wins). Used by the activity executor to tell apart "never scheduled" (empty),
+     * "in flight" (ACTIVITY_SCHEDULED / ACTIVITY_STARTED), "awaiting retry" (ACTIVITY_RETRY_SCHEDULED),
+     * and terminal (ACTIVITY_COMPLETED / ACTIVITY_FAILED) states.
+     */
+    public Optional<Event> latestEventForSeq(int targetSeq) {
+        Event latest = null;
+        for (Event e : history) {
+            if (e.getSeq() != null && e.getSeq() == targetSeq) latest = e;
+        }
+        return Optional.ofNullable(latest);
+    }
+
+    /** All events recorded for this seq, in id (chronological) order. */
+    public List<Event> eventsForSeq(int targetSeq) {
+        List<Event> out = new java.util.ArrayList<>();
+        for (Event e : history) {
+            if (e.getSeq() != null && e.getSeq() == targetSeq) out.add(e);
+        }
+        return out;
+    }
+
     /** Find an event by (seq, exact type). Used to avoid double-writing markers. */
     public Optional<Event> findBySeqAndType(int targetSeq, EventType type) {
         for (Event e : history) {

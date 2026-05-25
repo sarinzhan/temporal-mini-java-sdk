@@ -3,6 +3,7 @@ package com.beeline.workflow.spring.autoconfigure;
 import com.beeline.workflow.core.api.Workflow;
 import com.beeline.workflow.engine.executor.ActivityExecutor;
 import com.beeline.workflow.engine.executor.ActivityExecutorImpl;
+import com.beeline.workflow.engine.executor.ActivityTaskExecutor;
 import com.beeline.workflow.engine.executor.WorkflowExecutor;
 import com.beeline.workflow.engine.query.WorkflowQueryRuntime;
 import com.beeline.workflow.engine.scheduler.TimeoutWatcher;
@@ -78,17 +79,29 @@ public class WorkflowAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public ActivityExecutor activityExecutor(EventRepository eventRepository,
-                                             RetryRepository retryRepository,
+                                             TaskRepository taskRepository,
                                              ObjectMapper objectMapper,
                                              PlatformTransactionManager transactionManager,
                                              org.springframework.beans.factory.ObjectProvider<com.beeline.workflow.web.service.ActivityOptionsOverrideService> overrideProvider) {
         com.beeline.workflow.web.service.ActivityOptionsOverrideService overrides = overrideProvider.getIfAvailable();
         if (overrides == null) {
-            return new ActivityExecutorImpl(eventRepository, retryRepository,
+            return new ActivityExecutorImpl(eventRepository, taskRepository,
                     objectMapper, transactionManager);
         }
-        return new ActivityExecutorImpl(eventRepository, retryRepository,
+        return new ActivityExecutorImpl(eventRepository, taskRepository,
                 objectMapper, transactionManager, overrides::resolve);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ActivityTaskExecutor activityTaskExecutor(EventRepository eventRepository,
+                                                     RetryRepository retryRepository,
+                                                     TaskRepository taskRepository,
+                                                     ActivityRegistry activityRegistry,
+                                                     ObjectMapper objectMapper,
+                                                     PlatformTransactionManager transactionManager) {
+        return new ActivityTaskExecutor(eventRepository, retryRepository, taskRepository,
+                activityRegistry, objectMapper, transactionManager);
     }
 
     @Bean
@@ -161,9 +174,11 @@ public class WorkflowAutoConfiguration {
     @ConditionalOnMissingBean
     public WorkerLoop workerLoop(TaskRepository taskRepository,
                                  WorkflowExecutor workflowExecutor,
+                                 ActivityTaskExecutor activityTaskExecutor,
                                  WorkflowProperties properties,
                                  PlatformTransactionManager transactionManager) {
-        return new WorkerLoopImpl(taskRepository, workflowExecutor, properties, transactionManager);
+        return new WorkerLoopImpl(taskRepository, workflowExecutor, activityTaskExecutor,
+                properties, transactionManager);
     }
 
     @Bean
