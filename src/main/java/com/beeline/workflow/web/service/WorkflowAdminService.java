@@ -3,14 +3,13 @@ package com.beeline.workflow.web.service;
 import com.beeline.workflow.core.model.Event;
 import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.core.model.RetryRecord;
-import com.beeline.workflow.core.model.Signal;
 import com.beeline.workflow.core.model.Task;
 import com.beeline.workflow.core.model.TaskStatus;
 import com.beeline.workflow.core.model.WorkflowInstance;
 import com.beeline.workflow.core.model.WorkflowStatus;
+import com.beeline.workflow.engine.signal.SignalBus;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.RetryRepository;
-import com.beeline.workflow.persistence.repository.SignalRepository;
 import com.beeline.workflow.persistence.repository.TaskRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
 import org.slf4j.Logger;
@@ -28,18 +27,18 @@ public class WorkflowAdminService {
     private final TaskRepository taskRepository;
     private final EventRepository eventRepository;
     private final RetryRepository retryRepository;
-    private final SignalRepository signalRepository;
+    private final SignalBus signalBus;
 
     public WorkflowAdminService(WorkflowRepository workflowRepository,
                                 TaskRepository taskRepository,
                                 EventRepository eventRepository,
                                 RetryRepository retryRepository,
-                                SignalRepository signalRepository) {
+                                SignalBus signalBus) {
         this.workflowRepository = workflowRepository;
         this.taskRepository = taskRepository;
         this.eventRepository = eventRepository;
         this.retryRepository = retryRepository;
-        this.signalRepository = signalRepository;
+        this.signalBus = signalBus;
     }
 
     @Transactional
@@ -142,17 +141,13 @@ public class WorkflowAdminService {
         log.info("Activity {}/{} force-retried by admin action", workflowId, activityName);
     }
 
-    @Transactional
     public void sendSignal(Long workflowId, String signalName, String payload) {
         if (signalName == null || signalName.isBlank()) {
             throw new IllegalArgumentException("signalName is required");
         }
-        Signal s = new Signal();
-        s.setWorkflowId(workflowId);
-        s.setSignalName(signalName);
-        s.setPayload(payload);
-        s.setConsumed(false);
-        signalRepository.save(s);
+        // Delegate to SignalBus so the SIGNAL_RECEIVED event is recorded and the workflow is
+        // nudged — a raw signals-table insert would never reach a parked workflow.
+        signalBus.send(workflowId, signalName, payload);
         log.info("Signal {} sent to workflow {}", signalName, workflowId);
     }
 

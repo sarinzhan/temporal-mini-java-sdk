@@ -1,6 +1,7 @@
 package com.beeline.workflow.engine.query;
 
 import com.beeline.workflow.core.model.Event;
+import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.core.model.WorkflowInstance;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
 import com.beeline.workflow.engine.context.WorkflowContextImpl;
@@ -92,6 +93,9 @@ public class WorkflowQueryRuntime {
                 noopSink(), noopRegistrar(), com.beeline.workflow.engine.replay.TaskLease.ALWAYS_OWNED);
         WorkflowContextHolder.set(ctx);
         try {
+            // Reconstruct signal-driven state so queries observe fields set by @SignalMethod handlers,
+            // exactly as the live turn does before replaying the entry method.
+            deliverSignals(wf.getWorkflowType(), instance, history);
             try {
                 entry.invoke(instance, entryArgs);
             } catch (InvocationTargetException ite) {
@@ -119,6 +123,35 @@ public class WorkflowQueryRuntime {
         }
     }
 
+    /** Mirror of WorkflowExecutor.deliverSignals: replay SIGNAL_RECEIVED events into @SignalMethod handlers. */
+    private void deliverSignals(String workflowType, Object instance, List<Event> history) {
+        for (Event e : history) {
+            if (e.getEventType() != EventType.SIGNAL_RECEIVED) continue;
+            Method handler = workflowRegistry.getSignalMethod(workflowType, e.getActivityName());
+            if (handler == null) continue;
+            try {
+                handler.invoke(instance, buildSignalArgs(handler, e.getPayload()));
+            } catch (ReflectiveOperationException roe) {
+                // A failing signal handler shouldn't break a query; log and continue with partial state.
+                log.debug("signal handler {} threw during query replay: {}", e.getActivityName(), roe.getMessage());
+            }
+        }
+    }
+
+    private Object[] buildSignalArgs(Method handler, String payload) {
+        if (handler.getParameterCount() == 0) return new Object[0];
+        Type paramType = handler.getGenericParameterTypes()[0];
+        if (paramType == String.class) return new Object[]{payload};
+        if (payload == null) return new Object[]{null};
+        try {
+            JavaType jt = objectMapper.constructType(paramType);
+            return new Object[]{objectMapper.readValue(payload, jt)};
+        } catch (Exception ex) {
+            throw new RuntimeException("Failed to deserialize signal payload for handler "
+                    + handler.getName(), ex);
+        }
+    }
+
     private Method findEntryMethod(Class<?> beanClass) {
         List<Method> candidates = Arrays.stream(beanClass.getDeclaredMethods())
                 .filter(m -> Modifier.isPublic(m.getModifiers()))
@@ -126,6 +159,7 @@ public class WorkflowQueryRuntime {
                 .filter(m -> !m.isSynthetic() && !m.isBridge())
                 .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.QueryMethod.class))
                 .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.UpdateMethod.class))
+                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.SignalMethod.class))
                 .toList();
         if (candidates.size() == 1) return candidates.get(0);
         Optional<Method> namedRun = candidates.stream().filter(m -> m.getName().equals("run")).findFirst();

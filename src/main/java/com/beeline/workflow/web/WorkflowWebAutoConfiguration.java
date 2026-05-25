@@ -1,6 +1,7 @@
 package com.beeline.workflow.web;
 
 import com.beeline.workflow.engine.query.WorkflowQueryRuntime;
+import com.beeline.workflow.engine.signal.SignalBus;
 import com.beeline.workflow.engine.update.UpdateRegistry;
 import com.beeline.workflow.engine.worker.WorkerLoop;
 import com.beeline.workflow.engine.worker.WorkerLoopImpl;
@@ -8,7 +9,6 @@ import com.beeline.workflow.persistence.repository.ActivityOptionOverrideReposit
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.InstanceRegistryRepository;
 import com.beeline.workflow.persistence.repository.RetryRepository;
-import com.beeline.workflow.persistence.repository.SignalRepository;
 import com.beeline.workflow.persistence.repository.TaskRepository;
 import com.beeline.workflow.persistence.repository.UpdateRequestRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
@@ -63,9 +63,9 @@ public class WorkflowWebAutoConfiguration {
                                                      TaskRepository taskRepository,
                                                      EventRepository eventRepository,
                                                      RetryRepository retryRepository,
-                                                     SignalRepository signalRepository) {
+                                                     SignalBus signalBus) {
         return new WorkflowAdminService(workflowRepository, taskRepository, eventRepository,
-                retryRepository, signalRepository);
+                retryRepository, signalBus);
     }
 
     @Bean

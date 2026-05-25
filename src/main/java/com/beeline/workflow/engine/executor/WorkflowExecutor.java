@@ -128,6 +128,11 @@ public class WorkflowExecutor {
         // so that concurrent workflow instances of the same type don't race on field state.
         synchronized (bean) {
             try {
+                // Reconstruct signal-driven state before replaying the entry method: deliver every
+                // SIGNAL_RECEIVED event recorded so far to its @SignalMethod handler. Handlers are
+                // pure field mutators, so re-delivering the full history each turn is deterministic
+                // and the entry method's await(condition) observes the resulting state.
+                deliverSignals(wf, bean, history);
                 Outcome entryOutcome = runEntry(wf, bean, entryMethod, callArgs);
                 // After the entry method parked/completed, dispatch any pending updates for this workflow.
                 processPendingUpdates(wf, bean);
@@ -222,6 +227,49 @@ public class WorkflowExecutor {
             } catch (Exception ex) {
                 completeUpdateFailure(req, safeMessage(ex));
             }
+        }
+    }
+
+    /**
+     * Deliver every {@code SIGNAL_RECEIVED} event in history (id order) to its {@code @SignalMethod}
+     * handler. Runs once per turn, before the entry method replays. No events are written and no seq
+     * is consumed — handlers only mutate workflow fields, so this is replay-safe. A signal with no
+     * matching handler is logged and skipped (the workflow simply never reacts to it).
+     */
+    private void deliverSignals(WorkflowInstance wf, Object bean, List<Event> history) {
+        for (Event e : history) {
+            if (e.getEventType() != EventType.SIGNAL_RECEIVED) continue;
+            String signalName = e.getActivityName();
+            Method handler = workflowRegistry.getSignalMethod(wf.getWorkflowType(), signalName);
+            if (handler == null) {
+                log.debug("[{}] no @SignalMethod named '{}' — signal ignored", wf.getId(), signalName);
+                continue;
+            }
+            try {
+                Object[] args = buildSignalArgs(handler, e.getPayload());
+                handler.invoke(bean, args);
+            } catch (InvocationTargetException ite) {
+                Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
+                throw new RuntimeException(
+                        "Signal handler " + signalName + " threw: " + safeMessage(cause), cause);
+            } catch (ReflectiveOperationException roe) {
+                throw new RuntimeException("Failed to invoke signal handler " + signalName, roe);
+            }
+        }
+    }
+
+    private Object[] buildSignalArgs(Method handler, String payload) {
+        if (handler.getParameterCount() == 0) return new Object[0];
+        Type paramType = handler.getGenericParameterTypes()[0];
+        // SignalBus.send stores raw Strings verbatim (not JSON-quoted); mirror that on the way back.
+        if (paramType == String.class) return new Object[]{payload};
+        if (payload == null) return new Object[]{null};
+        try {
+            JavaType jt = objectMapper.constructType(paramType);
+            return new Object[]{objectMapper.readValue(payload, jt)};
+        } catch (Exception ex) {
+            throw new RuntimeException("Failed to deserialize signal payload for handler "
+                    + handler.getName(), ex);
         }
     }
 
@@ -348,6 +396,7 @@ public class WorkflowExecutor {
                 .filter(m -> !m.isSynthetic() && !m.isBridge())
                 .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.QueryMethod.class))
                 .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.UpdateMethod.class))
+                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.SignalMethod.class))
                 .toList();
         if (candidates.size() == 1) return candidates.get(0);
         Optional<Method> namedRun = candidates.stream()

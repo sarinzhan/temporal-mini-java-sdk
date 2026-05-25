@@ -9,7 +9,6 @@ import com.beeline.workflow.engine.replay.EventSink;
 import com.beeline.workflow.engine.replay.HistoryCursor;
 import com.beeline.workflow.engine.replay.QueryReplayBlockedException;
 import com.beeline.workflow.engine.replay.WorkflowParkedException;
-import com.beeline.workflow.engine.signal.SignalBus;
 import com.beeline.workflow.engine.stub.ActivityStubFactory;
 import tools.jackson.databind.ObjectMapper;
 
@@ -27,12 +26,7 @@ public final class Workflow {
     /** Returned by getVersion for workflows that pre-date the change. */
     public static final int DEFAULT_VERSION = -1;
 
-    private static volatile SignalBus signalBus;
     private static volatile ObjectMapper objectMapper;
-
-    public static void installSignalBus(SignalBus bus) {
-        Workflow.signalBus = bus;
-    }
 
     public static void installObjectMapper(ObjectMapper mapper) {
         Workflow.objectMapper = mapper;
@@ -254,18 +248,10 @@ public final class Workflow {
     }
 
     // ── Signals ─────────────────────────────────────────────────────────────
-
-//    public static Object waitForSignal(String signalName) {
-//        return waitForSignal(signalName, Duration.ofMinutes(5));
-//    }
-
-//    public static Object waitForSignal(String signalName, Duration timeout) {
-//        SignalBus bus = signalBus;
-//        if (bus == null) {
-//            throw new IllegalStateException(
-//                    "SignalBus is not initialized. The Spring autoconfigure must call Workflow.installSignalBus().");
-//        }
-//        WorkflowContext ctx = WorkflowContextHolder.require();
-//        return bus.await(ctx.getWorkflowId(), signalName, timeout);
-//    }
+    //
+    // Signals have no blocking primitive here. An external caller invokes
+    // SignalBus.send(workflowId, name, payload); the engine records a SIGNAL_RECEIVED
+    // event and re-runs the workflow turn. A @SignalMethod handler on the workflow
+    // mutates a field, and the entry method's await(timeout, () -> field...) observes
+    // it and unblocks.
 }

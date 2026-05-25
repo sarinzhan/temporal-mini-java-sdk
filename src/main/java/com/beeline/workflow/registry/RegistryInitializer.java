@@ -2,6 +2,7 @@ package com.beeline.workflow.registry;
 
 import com.beeline.workflow.core.annotation.Activity;
 import com.beeline.workflow.core.annotation.QueryMethod;
+import com.beeline.workflow.core.annotation.SignalMethod;
 import com.beeline.workflow.core.annotation.UpdateMethod;
 import com.beeline.workflow.core.annotation.WorkflowComponent;
 import jakarta.annotation.PostConstruct;
@@ -50,14 +51,14 @@ public class RegistryInitializer {
                 workflowRegistry.register(type, bean);
                 log.info("Registered workflow: {} -> {}", type, beanClass.getName());
 
-                scanQueryAndUpdateMethods(type, beanClass);
+                scanHandlerMethods(type, beanClass);
             }
         }
         log.info("RegistryInitializer: {} activities, {} workflows registered",
                 activityRegistry.size(), workflowRegistry.size());
     }
 
-    private void scanQueryAndUpdateMethods(String workflowType, Class<?> beanClass) {
+    private void scanHandlerMethods(String workflowType, Class<?> beanClass) {
         for (Method m : beanClass.getDeclaredMethods()) {
             if (m.isSynthetic() || m.isBridge()) continue;
             QueryMethod query = m.getAnnotation(QueryMethod.class);
@@ -71,6 +72,17 @@ public class RegistryInitializer {
                 String name = update.name().isBlank() ? m.getName() : update.name();
                 workflowRegistry.registerUpdate(workflowType, name, m);
                 log.info("Registered update: {}::{} -> {}", workflowType, name, m.getName());
+            }
+            SignalMethod signal = m.getAnnotation(SignalMethod.class);
+            if (signal != null) {
+                if (m.getParameterCount() > 1) {
+                    throw new IllegalStateException(
+                            "@SignalMethod " + beanClass.getName() + "::" + m.getName() +
+                            " must take 0 or 1 parameters, has " + m.getParameterCount());
+                }
+                String name = signal.name().isBlank() ? m.getName() : signal.name();
+                workflowRegistry.registerSignal(workflowType, name, m);
+                log.info("Registered signal: {}::{} -> {}", workflowType, name, m.getName());
             }
         }
     }

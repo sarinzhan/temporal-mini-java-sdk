@@ -10,6 +10,7 @@ public class WorkflowRegistry {
     private final Map<String, Class<?>> classesByType = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Method>> queriesByType = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Method>> updatesByType = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Method>> signalsByType = new ConcurrentHashMap<>();
 
     public void register(String workflowType, Object bean) {
         beansByType.put(workflowType, bean);
@@ -22,6 +23,10 @@ public class WorkflowRegistry {
 
     public void registerUpdate(String workflowType, String name, Method method) {
         updatesByType.computeIfAbsent(workflowType, k -> new ConcurrentHashMap<>()).put(name, method);
+    }
+
+    public void registerSignal(String workflowType, String name, Method method) {
+        signalsByType.computeIfAbsent(workflowType, k -> new ConcurrentHashMap<>()).put(name, method);
     }
 
     public Object getBean(String workflowType) {
@@ -39,6 +44,11 @@ public class WorkflowRegistry {
 
     public Method getUpdateMethod(String workflowType, String name) {
         Map<String, Method> m = updatesByType.get(workflowType);
+        return m != null ? m.get(name) : null;
+    }
+
+    public Method getSignalMethod(String workflowType, String name) {
+        Map<String, Method> m = signalsByType.get(workflowType);
         return m != null ? m.get(name) : null;
     }
 

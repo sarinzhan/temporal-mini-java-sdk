@@ -153,7 +153,6 @@ public class WorkflowAutoConfiguration {
                                PlatformTransactionManager transactionManager) {
         SignalBusImpl bus = new SignalBusImpl(signalRepository, eventRepository, taskRepository,
                 pendingAwaitRepository, objectMapper, transactionManager);
-        Workflow.installSignalBus(bus);
         Workflow.installObjectMapper(objectMapper);
         return bus;
     }
