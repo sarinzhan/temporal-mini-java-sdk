@@ -100,20 +100,6 @@ public class WorkflowWebAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public WorkflowInvocationService workflowInvocationService(WorkflowQueryRuntime queryRuntime,
-                                                               WorkflowRegistry workflowRegistry,
-                                                               WorkflowRepository workflowRepository,
-                                                               EventRepository eventRepository,
-                                                               TaskRepository taskRepository,
-                                                               UpdateRequestRepository updateRequestRepository,
-                                                               UpdateRegistry updateRegistry,
-                                                               ObjectMapper objectMapper) {
-        return new WorkflowInvocationService(queryRuntime, workflowRegistry, workflowRepository,
-                eventRepository, taskRepository, updateRequestRepository, updateRegistry, objectMapper);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
     public WorkflowInvocationController workflowInvocationController(WorkflowInvocationService service) {
         return new WorkflowInvocationController(service);
     }

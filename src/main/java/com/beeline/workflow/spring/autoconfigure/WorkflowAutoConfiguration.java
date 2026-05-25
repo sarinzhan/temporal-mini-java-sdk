@@ -15,6 +15,8 @@ import com.beeline.workflow.engine.cluster.InstanceRegistryService;
 import com.beeline.workflow.engine.signal.SignalBus;
 import com.beeline.workflow.engine.signal.SignalBusImpl;
 import com.beeline.workflow.engine.stub.ActivityStubFactory;
+import com.beeline.workflow.engine.stub.WorkflowStubFactory;
+import com.beeline.workflow.web.service.WorkflowInvocationService;
 import com.beeline.workflow.engine.worker.WorkerLoop;
 import com.beeline.workflow.engine.worker.WorkerLoopImpl;
 import com.beeline.workflow.persistence.repository.EventRepository;
@@ -200,12 +202,42 @@ public class WorkflowAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    public WorkflowInvocationService workflowInvocationService(WorkflowQueryRuntime queryRuntime,
+                                                               WorkflowRegistry workflowRegistry,
+                                                               WorkflowRepository workflowRepository,
+                                                               EventRepository eventRepository,
+                                                               TaskRepository taskRepository,
+                                                               UpdateRequestRepository updateRequestRepository,
+                                                               UpdateRegistry updateRegistry,
+                                                               ObjectMapper objectMapper) {
+        return new WorkflowInvocationService(queryRuntime, workflowRegistry, workflowRepository,
+                eventRepository, taskRepository, updateRequestRepository, updateRegistry, objectMapper);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public WorkflowClient workflowClient1(WorkflowRepository workflowRepository,
                                          TaskRepository taskRepository,
                                          EventRepository eventRepository,
                                          WorkflowRegistry workflowRegistry,
                                          ObjectMapper objectMapper) {
         return new WorkflowClientImpl(workflowRepository, taskRepository, eventRepository, workflowRegistry, objectMapper);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowStubFactory workflowStubFactory(SignalBus signalBus,
+                                                   WorkflowQueryRuntime queryRuntime,
+                                                   WorkflowInvocationService invocationService,
+                                                   UpdateRegistry updateRegistry,
+                                                   WorkflowRegistry workflowRegistry,
+                                                   WorkflowRepository workflowRepository,
+                                                   ObjectMapper objectMapper,
+                                                   WorkflowClient workflowClient) {
+        WorkflowStubFactory.WorkflowStarter starter =
+                (WorkflowStubFactory.WorkflowStarter) workflowClient;
+        return new WorkflowStubFactory(signalBus, queryRuntime, invocationService, updateRegistry,
+                workflowRegistry, workflowRepository, objectMapper, starter);
     }
 
     @Bean

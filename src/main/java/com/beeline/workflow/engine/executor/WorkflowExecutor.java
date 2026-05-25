@@ -36,12 +36,9 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
 import java.time.Instant;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Optional;
 
 public class WorkflowExecutor {
 
@@ -95,11 +92,9 @@ public class WorkflowExecutor {
             return Outcome.FAILED;
         }
 
-        Method entryMethod;
-        try {
-            entryMethod = findEntryMethod(bean.getClass());
-        } catch (RuntimeException ex) {
-            markFailed(wf, ex.getMessage());
+        Method entryMethod = workflowRegistry.getEntryMethod(wf.getWorkflowType());
+        if (entryMethod == null) {
+            markFailed(wf, "No @WorkflowMethod registered for type: " + wf.getWorkflowType());
             return Outcome.FAILED;
         }
 
@@ -387,25 +382,6 @@ public class WorkflowExecutor {
             e.setPayload(payload);
             eventRepository.save(e);
         });
-    }
-
-    private Method findEntryMethod(Class<?> beanClass) {
-        List<Method> candidates = Arrays.stream(beanClass.getDeclaredMethods())
-                .filter(m -> Modifier.isPublic(m.getModifiers()))
-                .filter(m -> !Modifier.isStatic(m.getModifiers()))
-                .filter(m -> !m.isSynthetic() && !m.isBridge())
-                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.QueryMethod.class))
-                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.UpdateMethod.class))
-                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.SignalMethod.class))
-                .toList();
-        if (candidates.size() == 1) return candidates.get(0);
-        Optional<Method> namedRun = candidates.stream()
-                .filter(m -> m.getName().equals("run"))
-                .findFirst();
-        if (namedRun.isPresent()) return namedRun.get();
-        throw new IllegalStateException(
-                "Cannot determine workflow entry method on " + beanClass.getName() +
-                " — expected exactly one public method, or one named 'run'.");
     }
 
     private Object[] buildCallArgs(Method entryMethod, String inputJson) throws Exception {

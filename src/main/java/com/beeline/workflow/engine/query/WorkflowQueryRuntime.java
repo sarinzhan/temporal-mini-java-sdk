@@ -23,12 +23,9 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
 import java.time.Instant;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Runs a workflow's {@code @QueryMethod} synchronously over the recorded history.
@@ -81,7 +78,11 @@ public class WorkflowQueryRuntime {
         // Fresh wired instance — isolates state across queries and from the live worker.
         Object instance = applicationContext.getAutowireCapableBeanFactory().createBean(beanClass);
 
-        Method entry = findEntryMethod(beanClass);
+        Method entry = workflowRegistry.getEntryMethod(wf.getWorkflowType());
+        if (entry == null) {
+            throw new IllegalStateException(
+                    "No @WorkflowMethod registered for type: " + wf.getWorkflowType());
+        }
         Object[] entryArgs = buildEntryArgs(entry, wf.getInput());
 
         List<Event> history = eventRepository.findByWorkflowIdOrderByIdAsc(workflowId);
@@ -150,21 +151,6 @@ public class WorkflowQueryRuntime {
             throw new RuntimeException("Failed to deserialize signal payload for handler "
                     + handler.getName(), ex);
         }
-    }
-
-    private Method findEntryMethod(Class<?> beanClass) {
-        List<Method> candidates = Arrays.stream(beanClass.getDeclaredMethods())
-                .filter(m -> Modifier.isPublic(m.getModifiers()))
-                .filter(m -> !Modifier.isStatic(m.getModifiers()))
-                .filter(m -> !m.isSynthetic() && !m.isBridge())
-                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.QueryMethod.class))
-                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.UpdateMethod.class))
-                .filter(m -> !m.isAnnotationPresent(com.beeline.workflow.core.annotation.SignalMethod.class))
-                .toList();
-        if (candidates.size() == 1) return candidates.get(0);
-        Optional<Method> namedRun = candidates.stream().filter(m -> m.getName().equals("run")).findFirst();
-        return namedRun.orElseThrow(() -> new IllegalStateException(
-                "Cannot determine workflow entry method on " + beanClass.getName()));
     }
 
     private Object[] buildEntryArgs(Method entry, String inputJson) {

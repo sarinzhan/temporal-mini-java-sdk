@@ -11,10 +11,34 @@ public class WorkflowRegistry {
     private final Map<String, Map<String, Method>> queriesByType = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Method>> updatesByType = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Method>> signalsByType = new ConcurrentHashMap<>();
+    private final Map<Class<?>, String> typeByInterface = new ConcurrentHashMap<>();
+    private final Map<String, Class<?>> interfaceByType = new ConcurrentHashMap<>();
+    private final Map<String, Method> entryMethodByType = new ConcurrentHashMap<>();
 
     public void register(String workflowType, Object bean) {
         beansByType.put(workflowType, bean);
         classesByType.put(workflowType, bean.getClass());
+    }
+
+    public void registerInterface(String workflowType, Class<?> iface) {
+        typeByInterface.put(iface, workflowType);
+        interfaceByType.put(workflowType, iface);
+    }
+
+    public void registerEntry(String workflowType, Method entry) {
+        entryMethodByType.put(workflowType, entry);
+    }
+
+    public Class<?> getInterfaceForType(String workflowType) {
+        return interfaceByType.get(workflowType);
+    }
+
+    public String getTypeForInterface(Class<?> iface) {
+        return typeByInterface.get(iface);
+    }
+
+    public Method getEntryMethod(String workflowType) {
+        return entryMethodByType.get(workflowType);
     }
 
     public void registerQuery(String workflowType, String name, Method method) {
