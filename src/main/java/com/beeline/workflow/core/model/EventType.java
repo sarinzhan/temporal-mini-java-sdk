@@ -8,29 +8,12 @@ public enum EventType {
     WORKFLOW_TASK_COMPLETED,
     WORKFLOW_COMPLETED,
     WORKFLOW_FAILED,
-    WORKFLOW_CANCELLED,
 
-    // Activities
-    ACTIVITY_SCHEDULED,
+    // Activities (run inline; retry waits via a parked turn + schedule row)
     ACTIVITY_STARTED,
     ACTIVITY_COMPLETED,
     ACTIVITY_FAILED,
     ACTIVITY_RETRY_SCHEDULED,
-
-    // Timers (Workflow.sleep)
-    TIMER_STARTED,
-    TIMER_FIRED,
-
-    // Awaits (Workflow.await)
-    AWAIT_BLOCKED,
-    AWAIT_FIRED,
-
-    // Signals
-    SIGNAL_RECEIVED,
-
-    // Updates (@UpdateMethod)
-    UPDATE_REQUESTED,
-    UPDATE_COMPLETED,
 
     // Determinism helpers
     SIDE_EFFECT_RECORDED,

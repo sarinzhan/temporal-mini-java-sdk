@@ -8,24 +8,15 @@ import com.beeline.workflow.core.model.WorkflowInstance;
 import com.beeline.workflow.core.model.WorkflowStatus;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
 import com.beeline.workflow.engine.context.WorkflowContextImpl;
-import com.beeline.workflow.core.model.UpdateRequest;
-import com.beeline.workflow.engine.replay.CommandType;
 import com.beeline.workflow.engine.replay.EventSink;
 import com.beeline.workflow.engine.replay.EventSinkImpl;
 import com.beeline.workflow.engine.replay.HistoryCursor;
 import com.beeline.workflow.engine.replay.LockLostException;
 import com.beeline.workflow.engine.replay.NonDeterminismException;
 import com.beeline.workflow.engine.replay.TaskLease;
-import com.beeline.workflow.engine.replay.WakeupRegistrar;
-import com.beeline.workflow.engine.replay.WakeupRegistrarImpl;
 import com.beeline.workflow.engine.replay.WorkflowParkedException;
-import com.beeline.workflow.engine.update.UpdateRegistry;
-import com.beeline.workflow.persistence.repository.PendingAwaitRepository;
-import com.beeline.workflow.persistence.repository.PendingTimerRepository;
 import com.beeline.workflow.persistence.repository.EventRepository;
-import com.beeline.workflow.persistence.repository.UpdateRequestRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
-import com.beeline.workflow.registry.ActivityRegistry;
 import com.beeline.workflow.registry.WorkflowRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,42 +31,34 @@ import java.lang.reflect.Type;
 import java.time.Instant;
 import java.util.List;
 
+/**
+ * Drives one workflow decision turn. The entry method runs inline to completion in a single thread:
+ * activities execute inline (results cached in history), and the only suspension is an activity
+ * retry that parks the turn until the {@code WakeupScheduler} re-enqueues it. On process/node crash
+ * mid-turn, the lease expires and another node reclaims the task and replays from the top, skipping
+ * already-completed activities.
+ */
 public class WorkflowExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(WorkflowExecutor.class);
 
     private final WorkflowRegistry workflowRegistry;
-    private final ActivityRegistry activityRegistry;
     private final ActivityExecutor activityExecutor;
     private final WorkflowRepository workflowRepository;
     private final EventRepository eventRepository;
-    private final PendingTimerRepository pendingTimerRepository;
-    private final PendingAwaitRepository pendingAwaitRepository;
-    private final UpdateRequestRepository updateRequestRepository;
-    private final UpdateRegistry updateRegistry;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
 
     public WorkflowExecutor(WorkflowRegistry workflowRegistry,
-                            ActivityRegistry activityRegistry,
                             ActivityExecutor activityExecutor,
                             WorkflowRepository workflowRepository,
                             EventRepository eventRepository,
-                            PendingTimerRepository pendingTimerRepository,
-                            PendingAwaitRepository pendingAwaitRepository,
-                            UpdateRequestRepository updateRequestRepository,
-                            UpdateRegistry updateRegistry,
                             ObjectMapper objectMapper,
                             PlatformTransactionManager transactionManager) {
         this.workflowRegistry = workflowRegistry;
-        this.activityRegistry = activityRegistry;
         this.activityExecutor = activityExecutor;
         this.workflowRepository = workflowRepository;
         this.eventRepository = eventRepository;
-        this.pendingTimerRepository = pendingTimerRepository;
-        this.pendingAwaitRepository = pendingAwaitRepository;
-        this.updateRequestRepository = updateRequestRepository;
-        this.updateRegistry = updateRegistry;
         this.objectMapper = objectMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -110,48 +93,25 @@ public class WorkflowExecutor {
         List<Event> history = eventRepository.findByWorkflowIdOrderByIdAsc(wf.getId());
         HistoryCursor cursor = new HistoryCursor(wf.getId(), history, objectMapper);
         EventSink sink = new EventSinkImpl(wf.getId(), eventRepository, transactionTemplate, lease);
-        WakeupRegistrar wakeup = new WakeupRegistrarImpl(
-                wf.getId(), pendingTimerRepository, pendingAwaitRepository, transactionTemplate);
 
         markRunning(wf);
         saveEvent(wf, EventType.WORKFLOW_TASK_STARTED, null);
 
         WorkflowContextImpl ctx = new WorkflowContextImpl(
-                wf.getId(), task.getId(), activityExecutor, activityRegistry, cursor, sink, wakeup, lease);
+                wf.getId(), task.getId(), activityExecutor, cursor, sink, lease);
         WorkflowContextHolder.set(ctx);
-        // Singleton workflow bean has shared mutable fields. Synchronize the whole turn (entry + updates)
-        // so that concurrent workflow instances of the same type don't race on field state.
+        // The singleton workflow bean has shared mutable fields. Serialize turns of the same bean so
+        // concurrent instances of the same type don't race on field state.
         synchronized (bean) {
             try {
-                // Reconstruct signal-driven state before replaying the entry method: deliver every
-                // SIGNAL_RECEIVED event recorded so far to its @SignalMethod handler. Handlers are
-                // pure field mutators, so re-delivering the full history each turn is deterministic
-                // and the entry method's await(condition) observes the resulting state.
-                deliverSignals(wf, bean, history);
-                Outcome entryOutcome = runEntry(wf, bean, entryMethod, callArgs);
-                // After the entry method parked/completed, dispatch any pending updates for this workflow.
-                processPendingUpdates(wf, bean);
-                return entryOutcome;
+                return runEntry(wf, bean, entryMethod, callArgs);
             } catch (LockLostException lost) {
-                // Lease expired and another node reclaimed the task mid-turn. Discard this turn:
-                // every write was fenced, so nothing was persisted. The new owner takes over.
                 log.warn("[{}] lock lost during turn — discarding writes, another node owns the task", wf.getId());
                 return Outcome.LOST;
-            } catch (Exception ex) {
-                markFailed(wf, safeMessage(ex));
-                saveEvent(wf, EventType.WORKFLOW_FAILED, safeMessage(ex));
-                saveEvent(wf, EventType.WORKFLOW_TASK_COMPLETED, null);
-                return Outcome.FAILED;
             } finally {
                 WorkflowContextHolder.clear();
             }
         }
-    }
-
-    /** Fence: throw {@link LockLostException} if we no longer own the task driving this turn. */
-    private void assertOwned() {
-        var c = WorkflowContextHolder.current();
-        if (c != null) c.getTaskLease().assertOwned();
     }
 
     private Outcome runEntry(WorkflowInstance wf, Object bean, Method entryMethod, Object[] callArgs) {
@@ -167,15 +127,16 @@ public class WorkflowExecutor {
                 throw lost;  // handled in execute(): discard the turn, don't mark failed
             }
             if (cause instanceof WorkflowParkedException parked) {
-                log.info("[{}] workflow parked: {} seq={}", wf.getId(), parked.getKind(), parked.getSeq());
+                log.info("[{}] workflow parked: activity retry seq={}", wf.getId(), parked.getSeq());
                 saveEvent(wf, EventType.WORKFLOW_TASK_COMPLETED, null);
                 return Outcome.PARKED;
             }
             if (cause instanceof ActivityFailureException afe) {
-                log.info("[{}] workflow paused — activity {} failed, retry scheduled",
-                        wf.getId(), afe.getActivityName());
+                log.warn("[{}] workflow failed — activity {} terminally failed", wf.getId(), afe.getActivityName());
+                markFailed(wf, safeMessage(afe));
+                saveEvent(wf, EventType.WORKFLOW_FAILED, safeMessage(afe));
                 saveEvent(wf, EventType.WORKFLOW_TASK_COMPLETED, null);
-                return Outcome.RETRYING;
+                return Outcome.FAILED;
             }
             if (cause instanceof NonDeterminismException nde) {
                 log.error("[{}] workflow non-determinism detected: {}", wf.getId(), nde.getMessage());
@@ -198,148 +159,9 @@ public class WorkflowExecutor {
         }
     }
 
-    private void processPendingUpdates(WorkflowInstance wf, Object bean) {
-        List<UpdateRequest> pendings =
-                updateRequestRepository.findByWorkflowIdAndStatusOrderByCreatedAtAsc(wf.getId(), "PENDING");
-        for (UpdateRequest req : pendings) {
-            Method updateMethod = workflowRegistry.getUpdateMethod(wf.getWorkflowType(), req.getMethodName());
-            if (updateMethod == null) {
-                String err = "no @UpdateMethod named '" + req.getMethodName() + "' on " + wf.getWorkflowType();
-                completeUpdateFailure(req, err);
-                continue;
-            }
-            try {
-                assertOwned();
-                Object[] args = buildUpdateArgs(updateMethod, req.getArgsPayload());
-                Object result = updateMethod.invoke(bean, args);
-                completeUpdateSuccess(req, result);
-            } catch (LockLostException lost) {
-                throw lost;  // stop dispatching updates — we lost the lock
-            } catch (InvocationTargetException ite) {
-                Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
-                if (cause instanceof LockLostException lost) throw lost;
-                completeUpdateFailure(req, safeMessage(cause));
-            } catch (Exception ex) {
-                completeUpdateFailure(req, safeMessage(ex));
-            }
-        }
-    }
-
-    /**
-     * Deliver every {@code SIGNAL_RECEIVED} event in history (id order) to its {@code @SignalMethod}
-     * handler. Runs once per turn, before the entry method replays. No events are written and no seq
-     * is consumed — handlers only mutate workflow fields, so this is replay-safe. A signal with no
-     * matching handler is logged and skipped (the workflow simply never reacts to it).
-     */
-    private void deliverSignals(WorkflowInstance wf, Object bean, List<Event> history) {
-        for (Event e : history) {
-            if (e.getEventType() != EventType.SIGNAL_RECEIVED) continue;
-            String signalName = e.getActivityName();
-            Method handler = workflowRegistry.getSignalMethod(wf.getWorkflowType(), signalName);
-            if (handler == null) {
-                log.debug("[{}] no @SignalMethod named '{}' — signal ignored", wf.getId(), signalName);
-                continue;
-            }
-            try {
-                Object[] args = buildSignalArgs(handler, e.getPayload());
-                handler.invoke(bean, args);
-            } catch (InvocationTargetException ite) {
-                Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
-                throw new RuntimeException(
-                        "Signal handler " + signalName + " threw: " + safeMessage(cause), cause);
-            } catch (ReflectiveOperationException roe) {
-                throw new RuntimeException("Failed to invoke signal handler " + signalName, roe);
-            }
-        }
-    }
-
-    private Object[] buildSignalArgs(Method handler, String payload) {
-        if (handler.getParameterCount() == 0) return new Object[0];
-        Type paramType = handler.getGenericParameterTypes()[0];
-        // SignalBus.send stores raw Strings verbatim (not JSON-quoted); mirror that on the way back.
-        if (paramType == String.class) return new Object[]{payload};
-        if (payload == null) return new Object[]{null};
-        try {
-            JavaType jt = objectMapper.constructType(paramType);
-            return new Object[]{objectMapper.readValue(payload, jt)};
-        } catch (Exception ex) {
-            throw new RuntimeException("Failed to deserialize signal payload for handler "
-                    + handler.getName(), ex);
-        }
-    }
-
-    private void completeUpdateSuccess(UpdateRequest req, Object result) {
-        assertOwned();
-        transactionTemplate.executeWithoutResult(s -> {
-            req.setStatus("COMPLETED");
-            req.setResult(serialize(result));
-            req.setCompletedAt(Instant.now());
-            updateRequestRepository.save(req);
-
-            Event done = new Event();
-            done.setWorkflowId(req.getWorkflowId());
-            done.setEventType(EventType.UPDATE_COMPLETED);
-            done.setCommandType(CommandType.UPDATE.name());
-            done.setActivityName(req.getMethodName());
-            done.setPayload("{\"updateId\":\"" + req.getUpdateId() + "\",\"result\":"
-                    + (req.getResult() != null ? req.getResult() : "null") + "}");
-            eventRepository.save(done);
-        });
-        updateRegistry.completeSuccess(req.getUpdateId(), result);
-        log.info("Update {}::{} completed for workflow {}",
-                req.getMethodName(), req.getUpdateId(), req.getWorkflowId());
-    }
-
-    private void completeUpdateFailure(UpdateRequest req, String error) {
-        assertOwned();
-        transactionTemplate.executeWithoutResult(s -> {
-            req.setStatus("FAILED");
-            req.setError(error);
-            req.setCompletedAt(Instant.now());
-            updateRequestRepository.save(req);
-
-            Event done = new Event();
-            done.setWorkflowId(req.getWorkflowId());
-            done.setEventType(EventType.UPDATE_COMPLETED);
-            done.setCommandType(CommandType.UPDATE.name());
-            done.setActivityName(req.getMethodName());
-            done.setPayload("{\"updateId\":\"" + req.getUpdateId()
-                    + "\",\"error\":\"" + escapeJson(error) + "\"}");
-            eventRepository.save(done);
-        });
-        updateRegistry.completeFailure(req.getUpdateId(), error);
-        log.warn("Update {}::{} FAILED for workflow {}: {}",
-                req.getMethodName(), req.getUpdateId(), req.getWorkflowId(), error);
-    }
-
-    private Object[] buildUpdateArgs(Method updateMethod, String argsPayload) {
-        int n = updateMethod.getParameterCount();
-        if (n == 0) return new Object[0];
-        try {
-            JavaType arrType = objectMapper.getTypeFactory().constructArrayType(Object.class);
-            Object[] raw = argsPayload != null ? objectMapper.readValue(argsPayload, Object[].class) : new Object[0];
-            if (raw.length != n) {
-                throw new IllegalArgumentException(
-                        "update " + updateMethod.getName() + " expects " + n + " args, got " + raw.length);
-            }
-            Type[] paramTypes = updateMethod.getGenericParameterTypes();
-            Object[] coerced = new Object[n];
-            for (int i = 0; i < n; i++) {
-                JavaType jt = objectMapper.constructType(paramTypes[i]);
-                String json = objectMapper.writeValueAsString(raw[i]);
-                coerced[i] = objectMapper.readValue(json, jt);
-            }
-            return coerced;
-        } catch (RuntimeException re) {
-            throw re;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to deserialize update args", e);
-        }
-    }
-
-    private static String escapeJson(String v) {
-        if (v == null) return "";
-        return v.replace("\\", "\\\\").replace("\"", "\\\"");
+    private void assertOwned() {
+        var c = WorkflowContextHolder.current();
+        if (c != null) c.getTaskLease().assertOwned();
     }
 
     private void markRunning(WorkflowInstance wf) {
@@ -421,7 +243,7 @@ public class WorkflowExecutor {
 
     public enum Outcome {
         COMPLETED,
-        RETRYING,
+        /** Parked waiting out an activity retry backoff; the WakeupScheduler will re-enqueue. */
         PARKED,
         FAILED,
         UNKNOWN,

@@ -4,8 +4,6 @@ import com.beeline.workflow.engine.executor.ActivityExecutor;
 import com.beeline.workflow.engine.replay.EventSink;
 import com.beeline.workflow.engine.replay.HistoryCursor;
 import com.beeline.workflow.engine.replay.TaskLease;
-import com.beeline.workflow.engine.replay.WakeupRegistrar;
-import com.beeline.workflow.registry.ActivityRegistry;
 
 public interface WorkflowContext {
 
@@ -13,13 +11,9 @@ public interface WorkflowContext {
 
     ActivityExecutor getActivityExecutor();
 
-    ActivityRegistry getActivityRegistry();
-
     HistoryCursor getHistoryCursor();
 
     EventSink getEventSink();
-
-    WakeupRegistrar getWakeupRegistrar();
 
     /** Lease for the task driving this turn; used to fence writes against a lost lock. */
     TaskLease getTaskLease();

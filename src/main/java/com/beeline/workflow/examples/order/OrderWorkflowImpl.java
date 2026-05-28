@@ -2,34 +2,43 @@ package com.beeline.workflow.examples.order;
 
 import com.beeline.workflow.core.annotation.WorkflowComponent;
 import com.beeline.workflow.core.api.Workflow;
+import com.beeline.workflow.core.config.ActivityOptions;
+import com.beeline.workflow.core.config.RetryPolicy;
 
 import java.time.Duration;
 
 @WorkflowComponent
 public class OrderWorkflowImpl implements OrderWorkflow {
 
-    private volatile String approver;
-    private volatile String state = "NEW";
+    private final OrderActivities activities;
 
-    @Override
-    public String process(OrderRequest request) {
-        state = "WAITING_APPROVAL";
-        boolean ok = Workflow.await(Duration.ofMinutes(5), () -> approver != null);
-        if (!ok) {
-            state = "REJECTED_TIMEOUT";
-            return "rejected: no approver";
-        }
-        state = "APPROVED_BY_" + approver;
-        return "approved by " + approver + " for order=" + request.getOrderId() + " amount=" + request.getAmount();
+    public OrderWorkflowImpl(OrderActivities activities) {
+        this.activities = activities;
     }
 
     @Override
-    public void approve(String approver) {
-        this.approver = approver;
-    }
+    public String process(OrderRequest req) {
+        ActivityOptions opts = ActivityOptions.newBuilder()
+                .setStartToCloseTimeout(Duration.ofSeconds(30))
+                .setRetryPolicy(RetryPolicy.newBuilder()
+                        .setMaxAttempts(5)
+                        .setInitialInterval(Duration.ofSeconds(1))
+                        .setBackoffCoefficient(2.0)
+                        .setMaxInterval(Duration.ofSeconds(20))
+                        .addNoRetry(IllegalArgumentException.class)   // never retry these
+                        .build())
+                .build();
 
-    @Override
-    public String getState() {
-        return state;
+        // Value activity (Supplier): closure captures the injected bean + request.
+        String reservationId = Workflow.activity("reserve", opts,
+                () -> activities.reserve(req.getOrderId(), req.getAmount()));
+
+        String txnId = Workflow.activity("charge", opts,
+                () -> activities.charge(reservationId, req.getAmount()));
+
+        // Void activity (Runnable), default options.
+        Workflow.activity("notify", () -> activities.notifyCustomer(req.getOrderId(), txnId));
+
+        return "order " + req.getOrderId() + " charged: " + txnId;
     }
 }

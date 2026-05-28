@@ -8,9 +8,6 @@ public class WorkflowRegistry {
 
     private final Map<String, Object> beansByType = new ConcurrentHashMap<>();
     private final Map<String, Class<?>> classesByType = new ConcurrentHashMap<>();
-    private final Map<String, Map<String, Method>> queriesByType = new ConcurrentHashMap<>();
-    private final Map<String, Map<String, Method>> updatesByType = new ConcurrentHashMap<>();
-    private final Map<String, Map<String, Method>> signalsByType = new ConcurrentHashMap<>();
     private final Map<Class<?>, String> typeByInterface = new ConcurrentHashMap<>();
     private final Map<String, Class<?>> interfaceByType = new ConcurrentHashMap<>();
     private final Map<String, Method> entryMethodByType = new ConcurrentHashMap<>();
@@ -41,39 +38,12 @@ public class WorkflowRegistry {
         return entryMethodByType.get(workflowType);
     }
 
-    public void registerQuery(String workflowType, String name, Method method) {
-        queriesByType.computeIfAbsent(workflowType, k -> new ConcurrentHashMap<>()).put(name, method);
-    }
-
-    public void registerUpdate(String workflowType, String name, Method method) {
-        updatesByType.computeIfAbsent(workflowType, k -> new ConcurrentHashMap<>()).put(name, method);
-    }
-
-    public void registerSignal(String workflowType, String name, Method method) {
-        signalsByType.computeIfAbsent(workflowType, k -> new ConcurrentHashMap<>()).put(name, method);
-    }
-
     public Object getBean(String workflowType) {
         return beansByType.get(workflowType);
     }
 
     public Class<?> getBeanClass(String workflowType) {
         return classesByType.get(workflowType);
-    }
-
-    public Method getQueryMethod(String workflowType, String name) {
-        Map<String, Method> m = queriesByType.get(workflowType);
-        return m != null ? m.get(name) : null;
-    }
-
-    public Method getUpdateMethod(String workflowType, String name) {
-        Map<String, Method> m = updatesByType.get(workflowType);
-        return m != null ? m.get(name) : null;
-    }
-
-    public Method getSignalMethod(String workflowType, String name) {
-        Map<String, Method> m = signalsByType.get(workflowType);
-        return m != null ? m.get(name) : null;
     }
 
     public boolean contains(String workflowType) {

@@ -2,7 +2,6 @@ package com.beeline.workflow.engine.worker;
 
 import com.beeline.workflow.core.model.Task;
 import com.beeline.workflow.core.model.TaskStatus;
-import com.beeline.workflow.engine.executor.ActivityTaskExecutor;
 import com.beeline.workflow.engine.executor.WorkflowExecutor;
 import com.beeline.workflow.engine.replay.TaskLease;
 import com.beeline.workflow.persistence.repository.TaskRepository;
@@ -33,12 +32,8 @@ public class WorkerLoopImpl implements WorkerLoop {
 
     private static final Logger log = LoggerFactory.getLogger(WorkerLoopImpl.class);
 
-    /** Task type written by the activity executor; dispatched to {@link ActivityTaskExecutor}. */
-    private static final String ACTIVITY_TASK_TYPE = "activity";
-
     private final TaskRepository taskRepository;
     private final WorkflowExecutor workflowExecutor;
-    private final ActivityTaskExecutor activityTaskExecutor;
     private final WorkflowProperties properties;
     private final ExecutorService workerPool;
     private final Semaphore slots;
@@ -49,12 +44,10 @@ public class WorkerLoopImpl implements WorkerLoop {
 
     public WorkerLoopImpl(TaskRepository taskRepository,
                           WorkflowExecutor workflowExecutor,
-                          ActivityTaskExecutor activityTaskExecutor,
                           WorkflowProperties properties,
                           PlatformTransactionManager transactionManager) {
         this.taskRepository = taskRepository;
         this.workflowExecutor = workflowExecutor;
-        this.activityTaskExecutor = activityTaskExecutor;
         this.properties = properties;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         int pool = Math.max(1, properties.getWorkerPoolSize());
@@ -160,13 +153,9 @@ private List<Task> claimBatch(int batchSize) {
     private void processTask(Task task, TaskLease lease) {
         WorkflowExecutor.Outcome outcome;
         try {
-            // Dispatch by task type: 'activity' tasks run the activity on this worker thread (the
-            // workflow that scheduled it has parked); everything else drives a workflow decision turn.
-            if (ACTIVITY_TASK_TYPE.equals(task.getTaskType())) {
-                outcome = activityTaskExecutor.execute(task, lease);
-            } else {
-                outcome = workflowExecutor.execute(task, lease);
-            }
+            // Every task drives a workflow decision turn; the entry method (and any inline activities)
+            // run on this worker thread to completion or until a retry parks the turn.
+            outcome = workflowExecutor.execute(task, lease);
         } catch (Exception ex) {
             if (lease.isLost()) {
                 // Interrupted/aborted because we lost the lock — not a real failure.
@@ -190,7 +179,7 @@ private List<Task> claimBatch(int batchSize) {
             return;
         }
         TaskStatus status = switch (outcome) {
-            case COMPLETED, RETRYING, PARKED -> TaskStatus.DONE;
+            case COMPLETED, PARKED -> TaskStatus.DONE;
             case FAILED, UNKNOWN -> TaskStatus.DEAD;
             case LOST -> null;  // unreachable, handled above
         };

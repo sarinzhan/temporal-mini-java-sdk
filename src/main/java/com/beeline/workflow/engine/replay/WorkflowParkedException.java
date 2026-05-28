@@ -1,28 +1,23 @@
 package com.beeline.workflow.engine.replay;
 
 /**
- * Thrown by {@code Workflow.sleep}, {@code Workflow.await}, activity scheduling, and other
- * suspending commands to signal "this turn is over, please commit and re-schedule a wake-up".
- * Not an error — the {@link com.beeline.workflow.engine.executor.WorkflowExecutor} catches it
- * as a normal termination of a decision turn.
+ * Thrown to signal "this turn is over, please commit and stop". Not an error — the
+ * {@link com.beeline.workflow.engine.executor.WorkflowExecutor} catches it as a normal end
+ * of a decision turn.
  *
- * <p>{@code ACTIVITY} is thrown after the workflow thread has scheduled an activity Task: the
- * activity now runs on a separate worker thread, and the workflow resumes (via replay) once the
- * activity records its outcome and enqueues a wakeup.
+ * <p>The only suspending command now is an activity retry: when a failed-but-retryable activity
+ * schedules its next attempt, it writes {@code ACTIVITY_RETRY_SCHEDULED} + a {@code wflow.schedule}
+ * row (with the backoff {@code fireAt}) and parks. The {@code WakeupScheduler} re-enqueues the
+ * workflow when the schedule row is due, and replay resumes at the retrying activity.
  */
 public class WorkflowParkedException extends RuntimeException {
 
-    public enum Kind { TIMER, AWAIT, ACTIVITY }
-
-    private final Kind kind;
     private final int seq;
 
-    public WorkflowParkedException(Kind kind, int seq) {
-        super("workflow parked: " + kind + " seq=" + seq);
-        this.kind = kind;
+    public WorkflowParkedException(int seq) {
+        super("workflow parked: activity retry seq=" + seq);
         this.seq = seq;
     }
 
-    public Kind getKind() { return kind; }
     public int getSeq() { return seq; }
 }

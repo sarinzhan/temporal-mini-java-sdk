@@ -1,18 +1,16 @@
 package com.beeline.workflow.spring.api;
 
-import com.beeline.workflow.core.config.WorkflowOptions;
-
 public interface WorkflowClient {
 
-    <T> T newWorkflowStub(Class<T> iface, WorkflowOptions opts);
+    /**
+     * Start a workflow by its {@code @WorkflowInterface} type. The input is serialized and stored;
+     * the returned handle deserializes the result against the entry method's return type.
+     */
+    <R> WorkflowHandle<R> start(Class<?> workflowInterface, Object input);
 
-    <T> T newWorkflowStub(Class<T> iface, Long instanceId);
-
-    <A, R> WorkflowHandle<R> start(WfFunc1<A, R> fn, A arg);
-
-    <R> WorkflowHandle<R> start(WfFunc0<R> fn);
-
-    <A> WorkflowHandle<Void> start(WfProc1<A> fn, A arg);
-
-    WorkflowHandle<Void> start(WfProc0 fn);
+    /**
+     * Start a workflow by its registered type name, with the input already serialized to JSON.
+     * Returns the new workflow id. Intended for the REST layer.
+     */
+    Long startByType(String workflowType, String inputJson);
 }

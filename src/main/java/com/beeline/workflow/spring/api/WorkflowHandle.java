@@ -11,4 +11,9 @@ public interface WorkflowHandle<T> {
     WorkflowStatus getStatus();
 
     T getResult(long timeoutMs);
+
+    /** Block (up to ~max long ms) until the workflow completes, then return its result. */
+    default T getResult() {
+        return getResult(Long.MAX_VALUE);
+    }
 }

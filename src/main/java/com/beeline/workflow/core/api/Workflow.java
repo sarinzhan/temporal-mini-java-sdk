@@ -4,20 +4,20 @@ import com.beeline.workflow.core.config.ActivityOptions;
 import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
 import com.beeline.workflow.engine.replay.CommandType;
-import com.beeline.workflow.engine.replay.EventSink;
 import com.beeline.workflow.engine.replay.HistoryCursor;
-import com.beeline.workflow.engine.replay.QueryReplayBlockedException;
-import com.beeline.workflow.engine.replay.WorkflowParkedException;
-import com.beeline.workflow.engine.stub.ActivityStubFactory;
 import tools.jackson.databind.ObjectMapper;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
+/**
+ * Facade used from inside workflow code. Activities are passed as inline lambdas and run on the
+ * workflow thread; their results are recorded to history and replayed on re-run. Identity of an
+ * activity is its command seq (call order) — an optional name is recorded for readability only.
+ */
 public final class Workflow {
 
     private Workflow() {}
@@ -31,59 +31,69 @@ public final class Workflow {
         Workflow.objectMapper = mapper;
     }
 
-    // ── Typed-interface stub (JDK Proxy) ────────────────────────────────────
+    // ── Activities: inline lambdas ───────────────────────────────────────────
+    //
+    // Supplier<T>  — value, no input.            Runnable      — void, no input.
+    // Function<I,O>— value, with input.          Consumer<I>   — void, with input.
+    //
+    // NOTE on overloads: Java cannot always disambiguate a value-returning lambda passed where both a
+    // value (Supplier/Function) and a void (Runnable/Consumer) overload apply. The no-input pair
+    // (Supplier/Runnable) resolves cleanly; for the with-input pair (Function/Consumer) a
+    // value-returning method-call lambda may be ambiguous — cast the lambda
+    // (e.g. {@code (Function<I,O>) x -> ...}) or capture the input in a Supplier/Runnable instead.
 
-    public static <T> T newActivityStub(Class<T> activityInterface) {
-        return newActivityStub(activityInterface, ActivityOptions.defaultOptions());
+    public static <T> T activity(Supplier<T> fn) {
+        return activity(null, ActivityOptions.defaultOptions(), fn);
     }
-
-    public static <T> T newActivityStub(Class<T> activityInterface, ActivityOptions options) {
-        return ActivityStubFactory.createStub(activityInterface, options);
-    }
-
-    // ── Functional activity API (removed) ────────────────────────────────────
-    //
-    // Activities now run on a separate worker thread as durable 'activity' tasks: the workflow
-    // thread records the call (interface + method + serialized args) and parks. An opaque
-    // Supplier/Function/Runnable closure cannot be persisted to a task and re-run on another
-    // thread/node, so the inline functional API is no longer supported. Use a typed activity stub
-    // instead:
-    //
-    //     MyActivities acts = Workflow.newActivityStub(MyActivities.class, options);
-    //     var result = acts.doWork(arg);
-    //
-    // The overloads are retained so existing call sites fail fast with a clear message rather than
-    // silently disappearing from the API.
 
     public static <T> T activity(String name, Supplier<T> fn) {
-        throw functionalActivityRemoved(name);
+        return activity(name, ActivityOptions.defaultOptions(), fn);
     }
 
+    public static <T> T activity(ActivityOptions options, Supplier<T> fn) {
+        return activity(null, options, fn);
+    }
+
+    @SuppressWarnings("unchecked")
     public static <T> T activity(String name, ActivityOptions options, Supplier<T> fn) {
-        throw functionalActivityRemoved(name);
+        return (T) executor().execute(name, options, null, () -> fn.get());
     }
 
-    public static <I, O> O activity(String name, I input, Function<I, O> fn) {
-        throw functionalActivityRemoved(name);
-    }
-
-    public static <I, O> O activity(String name, ActivityOptions options, I input, Function<I, O> fn) {
-        throw functionalActivityRemoved(name);
+    public static void activity(Runnable fn) {
+        activity(null, ActivityOptions.defaultOptions(), fn);
     }
 
     public static void activity(String name, Runnable fn) {
-        throw functionalActivityRemoved(name);
+        activity(name, ActivityOptions.defaultOptions(), fn);
+    }
+
+    public static void activity(ActivityOptions options, Runnable fn) {
+        activity(null, options, fn);
     }
 
     public static void activity(String name, ActivityOptions options, Runnable fn) {
-        throw functionalActivityRemoved(name);
+        executor().execute(name, options, null, () -> { fn.run(); return null; });
     }
 
-    private static UnsupportedOperationException functionalActivityRemoved(String name) {
-        return new UnsupportedOperationException(
-                "Functional Workflow.activity(\"" + name + "\", <lambda>) is no longer supported: activities "
-                + "run on a separate worker as durable tasks and a closure cannot be serialized. "
-                + "Use a typed stub: Workflow.newActivityStub(YourActivities.class[, options]).");
+    public static <I, O> O activity(I input, Function<I, O> fn) {
+        return activity(null, ActivityOptions.defaultOptions(), input, fn);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <I, O> O activity(String name, ActivityOptions options, I input, Function<I, O> fn) {
+        return (O) executor().execute(name, options, null, () -> fn.apply(input));
+    }
+
+    public static <I> void activity(I input, Consumer<I> fn) {
+        activity(null, ActivityOptions.defaultOptions(), input, fn);
+    }
+
+    public static <I> void activity(String name, ActivityOptions options, I input, Consumer<I> fn) {
+        executor().execute(name, options, null, () -> { fn.accept(input); return null; });
+    }
+
+    private static com.beeline.workflow.engine.executor.ActivityExecutor executor() {
+        return WorkflowContextHolder.require().getActivityExecutor();
     }
 
     // ── Determinism helpers ─────────────────────────────────────────────────
@@ -111,10 +121,6 @@ public final class Workflow {
             } catch (Exception e) {
                 throw new RuntimeException("Failed to deserialize sideEffect result", e);
             }
-        }
-
-        if (cursor.isQueryMode()) {
-            throw new QueryReplayBlockedException("sideEffect not recorded in history (seq=" + seq + ")");
         }
 
         T value = fn.get();
@@ -156,10 +162,6 @@ public final class Workflow {
         if (cursor.isInReplay()) {
             return DEFAULT_VERSION;
         }
-        if (cursor.isQueryMode()) {
-            // No marker yet and we're past history — treat as default for queries.
-            return DEFAULT_VERSION;
-        }
 
         int seq = cursor.nextSeq();
         ObjectMapper om = requireObjectMapper();
@@ -183,85 +185,4 @@ public final class Workflow {
         }
         return om;
     }
-
-    // ── Suspending commands: sleep, await ───────────────────────────────────
-
-    /**
-     * Suspend the workflow for at least {@code duration}. The current decision turn ends,
-     * the worker is freed, and the {@code WakeupScheduler} re-enqueues the workflow once
-     * the timer fires.
-     */
-    public static void sleep(Duration duration) {
-        WorkflowContext ctx = WorkflowContextHolder.require();
-        HistoryCursor cursor = ctx.getHistoryCursor();
-        int seq = cursor.nextSeq();
-
-        if (cursor.findCompletion(seq, CommandType.TIMER,
-                java.util.Set.of(EventType.TIMER_FIRED)).isPresent()) {
-            return;
-        }
-        if (cursor.isQueryMode()) {
-            throw new QueryReplayBlockedException("workflow parked at sleep seq=" + seq);
-        }
-
-        if (cursor.findBySeqAndType(seq, EventType.TIMER_STARTED).isEmpty()) {
-            Instant fireAt = Instant.now().plus(duration);
-            ctx.getEventSink().append(EventType.TIMER_STARTED, CommandType.TIMER, seq, null,
-                    "{\"fireAt\":\"" + fireAt + "\"}");
-            ctx.getWakeupRegistrar().registerTimer(seq, fireAt);
-        }
-        throw new WorkflowParkedException(WorkflowParkedException.Kind.TIMER, seq);
-    }
-
-    /**
-     * Block until {@code condition} returns true, optionally with a timeout.
-     * Suspends the workflow on each false evaluation; resumes when a signal arrives
-     * or when the timeout elapses.
-     *
-     * @return true if condition was satisfied; false if timed out
-     */
-    public static boolean await(Duration timeout, Supplier<Boolean> condition) {
-        WorkflowContext ctx = WorkflowContextHolder.require();
-        HistoryCursor cursor = ctx.getHistoryCursor();
-        int seq = cursor.nextSeq();
-
-        // Already resolved in a prior turn.
-        if (cursor.findCompletion(seq, CommandType.AWAIT,
-                java.util.Set.of(EventType.AWAIT_FIRED)).isPresent()) {
-            // The resolving turn already wrote AWAIT_FIRED. If timed out, return false.
-            var fired = cursor.findBySeqAndType(seq, EventType.AWAIT_FIRED).get();
-            return !payloadHasTimeout(fired.getPayload());
-        }
-
-        if (condition.get()) {
-            if (cursor.isQueryMode()) return true;
-            ctx.getEventSink().append(EventType.AWAIT_FIRED, CommandType.AWAIT, seq, null,
-                    "{\"reason\":\"condition\"}");
-            ctx.getWakeupRegistrar().deleteAwait(seq);
-            return true;
-        }
-        if (cursor.isQueryMode()) {
-            throw new QueryReplayBlockedException("workflow parked at await seq=" + seq);
-        }
-
-        if (cursor.findBySeqAndType(seq, EventType.AWAIT_BLOCKED).isEmpty()) {
-            Instant deadline = timeout != null ? Instant.now().plus(timeout) : null;
-            ctx.getEventSink().append(EventType.AWAIT_BLOCKED, CommandType.AWAIT, seq, null,
-                    deadline != null ? "{\"deadline\":\"" + deadline + "\"}" : "{}");
-            ctx.getWakeupRegistrar().registerAwait(seq, deadline);
-        }
-        throw new WorkflowParkedException(WorkflowParkedException.Kind.AWAIT, seq);
-    }
-
-    private static boolean payloadHasTimeout(String payload) {
-        return payload != null && payload.contains("\"reason\":\"timeout\"");
-    }
-
-    // ── Signals ─────────────────────────────────────────────────────────────
-    //
-    // Signals have no blocking primitive here. An external caller invokes
-    // SignalBus.send(workflowId, name, payload); the engine records a SIGNAL_RECEIVED
-    // event and re-runs the workflow turn. A @SignalMethod handler on the workflow
-    // mutates a field, and the entry method's await(timeout, () -> field...) observes
-    // it and unblocks.
 }

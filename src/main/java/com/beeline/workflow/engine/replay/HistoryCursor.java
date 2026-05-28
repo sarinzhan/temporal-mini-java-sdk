@@ -12,9 +12,8 @@ import java.util.Set;
 
 /**
  * Walks the history of events for a single workflow during replay. Hands out
- * monotonic seq numbers for each command (activity, timer, await, sideEffect,
- * version, update), and lets the engine ask "is this command already complete
- * in history?".
+ * monotonic seq numbers for each command (activity, sideEffect, version), and lets
+ * the engine ask "is this command already complete in history?".
  *
  * <p>Not thread-safe — a workflow turn runs on a single worker thread.
  */
@@ -25,7 +24,6 @@ public final class HistoryCursor {
     private final ObjectMapper objectMapper;
     private int seq = 0;
     private int maxHistorySeq;
-    private boolean queryMode = false;
 
     public HistoryCursor(Long workflowId, List<Event> history, ObjectMapper objectMapper) {
         this.workflowId = workflowId;
@@ -39,10 +37,6 @@ public final class HistoryCursor {
     }
 
     public Long getWorkflowId() { return workflowId; }
-
-    public boolean isQueryMode() { return queryMode; }
-
-    public void setQueryMode(boolean v) { this.queryMode = v; }
 
     public int nextSeq() { return ++seq; }
 
@@ -85,9 +79,9 @@ public final class HistoryCursor {
 
     /**
      * The most recent event recorded for this seq (history is ordered by id ascending, so the
-     * last match wins). Used by the activity executor to tell apart "never scheduled" (empty),
-     * "in flight" (ACTIVITY_SCHEDULED / ACTIVITY_STARTED), "awaiting retry" (ACTIVITY_RETRY_SCHEDULED),
-     * and terminal (ACTIVITY_COMPLETED / ACTIVITY_FAILED) states.
+     * last match wins). Used by the activity executor to tell apart "not yet completed"
+     * (e.g. only ACTIVITY_STARTED / ACTIVITY_RETRY_SCHEDULED, so run the next attempt) from
+     * terminal (ACTIVITY_COMPLETED → cached result / ACTIVITY_FAILED → re-throw) states.
      */
     public Optional<Event> latestEventForSeq(int targetSeq) {
         Event latest = null;

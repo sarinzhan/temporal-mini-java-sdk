@@ -1,8 +1,8 @@
 package com.beeline.workflow.engine.scheduler;
 
 /**
- * Periodically polls expired timers, expired awaits, and due retries; writes the
- * corresponding _FIRED events and enqueues workflow tasks so a worker can resume the workflow.
+ * Periodically polls the {@code wflow.schedule} table for due rows (e.g. an activity retry whose
+ * backoff has elapsed) and enqueues a {@code workflow} task so a worker re-runs the parked workflow.
  */
 public interface WakeupScheduler {
 

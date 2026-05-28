@@ -13,7 +13,7 @@ public final class WorkflowContextHolder {
         if (ctx == null) {
             throw new IllegalStateException(
                     "No workflow context bound to the current thread. " +
-                    "Activity stubs and Workflow facade methods may only be invoked from within a workflow execution.");
+                    "Workflow facade methods (activity, sideEffect, getVersion) may only be invoked from within a workflow execution.");
         }
         return ctx;
     }
