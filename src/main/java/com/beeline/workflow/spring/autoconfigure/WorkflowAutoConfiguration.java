@@ -1,6 +1,7 @@
 package com.beeline.workflow.spring.autoconfigure;
 
 import com.beeline.workflow.engine.cluster.InstanceRegistryService;
+import com.beeline.workflow.engine.codec.JacksonJsonFormatMapper;
 import com.beeline.workflow.engine.codec.PayloadCodec;
 import com.beeline.workflow.engine.command.CommandDispatcher;
 import com.beeline.workflow.engine.command.CommandHandler;
@@ -33,6 +34,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
+import org.springframework.boot.hibernate.autoconfigure.HibernatePropertiesCustomizer;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
@@ -78,6 +80,18 @@ public class WorkflowAutoConfiguration {
     @ConditionalOnMissingBean
     public RetryDecider retryDecider() {
         return new RetryDecider();
+    }
+
+    /**
+     * Wire Hibernate's JSON {@code FormatMapper} to the application's Jackson 3 ObjectMapper. Without
+     * this, JSONB columns ({@code @JdbcTypeCode(SqlTypes.JSON)}) fail at runtime because Hibernate's
+     * auto-detection only recognises Jackson 2 / Yasson, neither of which is on the classpath.
+     */
+    @Bean
+    @ConditionalOnMissingBean(name = "workflowJsonFormatMapperCustomizer")
+    public HibernatePropertiesCustomizer workflowJsonFormatMapperCustomizer(ObjectMapper objectMapper) {
+        return props -> props.put("hibernate.type.json_format_mapper",
+                new JacksonJsonFormatMapper(objectMapper));
     }
 
     @Bean

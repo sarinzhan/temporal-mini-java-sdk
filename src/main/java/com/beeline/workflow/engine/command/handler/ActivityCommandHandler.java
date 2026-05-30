@@ -20,11 +20,13 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
@@ -39,18 +41,43 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
     private final ExecutorService invocationPool;
 
     public ActivityCommandHandler(RetryDecider retryDecider) {
-        this(retryDecider, (name, opts) -> opts);
+        this(retryDecider, (name, opts) -> opts, 64);
     }
 
     public ActivityCommandHandler(RetryDecider retryDecider,
                                   BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver) {
+        this(retryDecider, optionsResolver, 64);
+    }
+
+    public ActivityCommandHandler(RetryDecider retryDecider,
+                                  BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver,
+                                  int maxThreads) {
         this.retryDecider = retryDecider;
         this.optionsResolver = optionsResolver;
-        this.invocationPool = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "wf-activity-" + System.nanoTime());
+        this.invocationPool = newBoundedPool(maxThreads);
+    }
+
+    /**
+     * Bounded pool with a stable thread count and a capped queue. When the pool and queue are both
+     * saturated, {@link java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy} makes the submitting
+     * worker thread run the activity itself — natural backpressure instead of unbounded thread growth.
+     */
+    private static ExecutorService newBoundedPool(int maxThreads) {
+        int threads = maxThreads > 0 ? maxThreads : 64;
+        var counter = new java.util.concurrent.atomic.AtomicLong();
+        ThreadFactory factory = r -> {
+            Thread t = new Thread(r, "wf-activity-" + counter.incrementAndGet());
             t.setDaemon(true);
             return t;
-        });
+        };
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+                threads, threads,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(threads * 16),
+                factory,
+                new ThreadPoolExecutor.CallerRunsPolicy());
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
     }
 
     @Override
@@ -125,10 +152,15 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
 
     private Object invokeWithTimeout(Supplier<Object> body, Duration timeout) throws Throwable {
         long timeoutMs = (timeout != null && !timeout.isNegative()) ? timeout.toMillis() : 0L;
-        CompletableFuture<Object> future = CompletableFuture.supplyAsync(body, invocationPool);
+        // Use the raw Future from the pool (NOT CompletableFuture): Future.cancel(true) actually
+        // interrupts the worker thread, so an activity blocked on I/O or one that checks the interrupt
+        // flag is genuinely stopped on timeout — CompletableFuture.cancel would merely abandon it and
+        // leak the thread. Purely CPU-bound activities that ignore interrupts still can't be forced
+        // down; that is a JVM limitation, but this is strictly better than before.
+        Future<Object> future = invocationPool.submit(body::get);
         try {
             if (timeoutMs <= 0) {
-                return future.join();
+                return future.get();
             }
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException te) {
@@ -136,6 +168,7 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
             throw new ActivityTimeoutException("activity", Duration.ofMillis(timeoutMs));
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
+            future.cancel(true);
             // Interrupted because our lease was lost — surface as lock-lost.
             CommandContext c = WorkflowContextHolder.current();
             if (c != null) c.taskLease().assertOwned();

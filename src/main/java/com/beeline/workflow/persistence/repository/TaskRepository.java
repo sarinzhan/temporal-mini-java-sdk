@@ -68,11 +68,17 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
      * only if we still own it (token matches and still PROCESSING). The committer calls this first
      * inside the commit transaction; if it returns 0 the lease was reclaimed and the commit aborts
      * without writing any events — the new owner is authoritative.
+     *
+     * <p>The {@code FOR UPDATE} lives in a subquery: PostgreSQL forbids {@code FOR UPDATE} together
+     * with an aggregate ({@code count(*)}) in the same query level, so the inner query takes the row
+     * lock and the outer query counts the locked rows (0 or 1).
      */
     @Query(value = """
-            SELECT count(*) FROM wflow.tasks
-            WHERE id = :id AND lock_token = :token AND status = 'PROCESSING'
-            FOR UPDATE
+            SELECT count(*) FROM (
+                SELECT 1 FROM wflow.tasks
+                WHERE id = :id AND lock_token = :token AND status = 'PROCESSING'
+                FOR UPDATE
+            ) locked
             """, nativeQuery = true)
     int lockIfOwned(@Param("id") Long id, @Param("token") String token);
 

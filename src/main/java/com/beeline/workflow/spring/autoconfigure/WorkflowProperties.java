@@ -7,6 +7,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class WorkflowProperties implements InitializingBean {
 
     private int workerPoolSize = 4;
+    private int activityMaxThreads = 64;
     private long pollIntervalMs = 1000;
     private long lockTimeoutSeconds = 60;
     private long leaseRenewIntervalMs = 20000;
