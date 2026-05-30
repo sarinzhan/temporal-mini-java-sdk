@@ -5,9 +5,11 @@ import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.core.model.Schedule;
 import com.beeline.workflow.core.model.Task;
 import com.beeline.workflow.core.model.TaskStatus;
+import com.beeline.workflow.core.model.WorkflowStatus;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.ScheduleRepository;
 import com.beeline.workflow.persistence.repository.TaskRepository;
+import com.beeline.workflow.persistence.repository.WorkflowRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -32,13 +34,16 @@ public class WakeupSchedulerImpl implements WakeupScheduler {
     private final ScheduleRepository scheduleRepository;
     private final EventRepository eventRepository;
     private final TaskRepository taskRepository;
+    private final WorkflowRepository workflowRepository;
 
     public WakeupSchedulerImpl(ScheduleRepository scheduleRepository,
                                EventRepository eventRepository,
-                               TaskRepository taskRepository) {
+                               TaskRepository taskRepository,
+                               WorkflowRepository workflowRepository) {
         this.scheduleRepository = scheduleRepository;
         this.eventRepository = eventRepository;
         this.taskRepository = taskRepository;
+        this.workflowRepository = workflowRepository;
     }
 
     @Override
@@ -57,6 +62,19 @@ public class WakeupSchedulerImpl implements WakeupScheduler {
         }
 
         for (Long workflowId : workflowsToEnqueue) {
+            // Skip workflows that have already reached a terminal state. Re-enqueuing one would replay
+            // its whole history and re-emit WORKFLOW_COMPLETED/FAILED, which the uq_events_workflow_terminal
+            // unique index then rejects — leaving a needlessly DEAD task and an ERROR in the log. A stray
+            // due schedule row for a finished workflow (e.g. a retry that the workflow later out-raced) is
+            // simply marked processed above and dropped here.
+            WorkflowStatus status = workflowRepository.findById(workflowId)
+                    .map(wf -> wf.getStatus())
+                    .orElse(null);
+            if (status == null || status == WorkflowStatus.COMPLETED || status == WorkflowStatus.FAILED) {
+                log.debug("Wakeup: skipping workflow {} (status={})", workflowId, status);
+                continue;
+            }
+
             Task t = new Task();
             t.setWorkflowId(workflowId);
             t.setTaskType("workflow.wakeup");

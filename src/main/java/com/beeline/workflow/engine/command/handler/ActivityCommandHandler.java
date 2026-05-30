@@ -19,22 +19,26 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
-import java.util.function.Supplier;
 
 public final class ActivityCommandHandler implements CommandHandler<ActivityCommand> {
 
     private static final Logger log = LoggerFactory.getLogger(ActivityCommandHandler.class);
+
+    /** How long to park a workflow when the activity pool rejects a submission (saturation backpressure). */
+    private static final Duration BACKPRESSURE_RETRY_DELAY = Duration.ofSeconds(1);
 
     private final RetryDecider retryDecider;
     private final BiFunction<String, ActivityOptions, ActivityOptions> optionsResolver;
@@ -59,8 +63,11 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
 
     /**
      * Bounded pool with a stable thread count and a capped queue. When the pool and queue are both
-     * saturated, {@link java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy} makes the submitting
-     * worker thread run the activity itself — natural backpressure instead of unbounded thread growth.
+     * saturated, {@link java.util.concurrent.ThreadPoolExecutor.AbortPolicy} rejects the submission
+     * with {@link RejectedExecutionException}. The handler turns that into a short workflow park
+     * (see {@code parkForBackpressure}) rather than running the activity inline on the worker thread:
+     * {@code CallerRunsPolicy} would have done the latter, silently breaking the start-to-close
+     * timeout (an inline run can't be cancelled) and blocking the worker that should be polling.
      */
     private static ExecutorService newBoundedPool(int maxThreads) {
         int threads = maxThreads > 0 ? maxThreads : 64;
@@ -75,7 +82,7 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(threads * 16),
                 factory,
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                new ThreadPoolExecutor.AbortPolicy());
         pool.allowCoreThreadTimeOut(true);
         return pool;
     }
@@ -113,12 +120,22 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
 
         int attempt = state.countUsedActivityAttempts(seq) + 1;
         RetryPolicy policy = options.getRetryPolicy() != null ? options.getRetryPolicy() : RetryPolicy.defaultPolicy();
+
+        // Reserve a pool slot BEFORE recording ACTIVITY_STARTED. If the pool is saturated the submit
+        // is rejected and the activity never runs, so we must not burn an attempt on it — park instead.
+        Future<Object> future;
+        try {
+            future = invocationPool.submit(cmd.body()::get);
+        } catch (RejectedExecutionException rejected) {
+            return parkForBackpressure(ctx, workflowId, seq, display, attempt);
+        }
+
         ctx.eventLog().activityStarted(seq, display, attempt);
         log.info("[{}/{}] activity running seq={} attempt={}", workflowId, display, seq, attempt);
 
         Object result;
         try {
-            result = invokeWithTimeout(cmd.body(), options.getStartToCloseTimeout());
+            result = awaitWithTimeout(future, options.getStartToCloseTimeout());
         } catch (LockLostException lost) {
             throw lost;
         } catch (Throwable cause) {
@@ -127,6 +144,23 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
         ctx.eventLog().activityCompleted(seq, display, attempt, result);
         log.info("[{}/{}] activity COMPLETED seq={} attempt={}", workflowId, display, seq, attempt);
         return result;
+    }
+
+    /**
+     * The activity pool was saturated, so the activity has not run. Park the workflow and schedule a
+     * short-delay wake-up WITHOUT recording an ACTIVITY_STARTED — so this rejected slot does not count
+     * toward {@code maxAttempts} (which counts STARTED events). The next turn re-runs the same attempt
+     * once capacity frees. This is natural backpressure that never fails a workflow for being busy.
+     */
+    private Object parkForBackpressure(CommandContext ctx, Long workflowId, int seq, String display, int attempt) {
+        if (ctx.taskLease().isLost()) {
+            throw new LockLostException(ctx.taskLease().taskId(), ctx.taskLease().token());
+        }
+        Instant fireAt = retryDecider.computeFireAt(BACKPRESSURE_RETRY_DELAY);
+        ctx.eventLog().activityRetryScheduled(seq, display, attempt, fireAt, "activity pool saturated (backpressure)");
+        log.warn("[{}/{}] activity pool saturated seq={} attempt={} — parked for backpressure until {}",
+                workflowId, display, seq, attempt, fireAt);
+        throw new WorkflowParkedException(seq);
     }
 
     /** Always throws — either {@link WorkflowParkedException} (retry) or {@link ActivityFailureException}. */
@@ -150,14 +184,13 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
         throw new ActivityFailureException(display, attempt, safeMessage(cause), cause);
     }
 
-    private Object invokeWithTimeout(Supplier<Object> body, Duration timeout) throws Throwable {
+    private Object awaitWithTimeout(Future<Object> future, Duration timeout) throws Throwable {
         long timeoutMs = (timeout != null && !timeout.isNegative()) ? timeout.toMillis() : 0L;
         // Use the raw Future from the pool (NOT CompletableFuture): Future.cancel(true) actually
         // interrupts the worker thread, so an activity blocked on I/O or one that checks the interrupt
         // flag is genuinely stopped on timeout — CompletableFuture.cancel would merely abandon it and
         // leak the thread. Purely CPU-bound activities that ignore interrupts still can't be forced
         // down; that is a JVM limitation, but this is strictly better than before.
-        Future<Object> future = invocationPool.submit(body::get);
         try {
             if (timeoutMs <= 0) {
                 return future.get();

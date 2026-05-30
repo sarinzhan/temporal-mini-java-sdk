@@ -178,8 +178,10 @@ public class WorkflowAutoConfiguration {
     @ConditionalOnMissingBean
     public WakeupScheduler wakeupScheduler(ScheduleRepository scheduleRepository,
                                            EventRepository eventRepository,
-                                           TaskRepository taskRepository) {
-        return new WakeupSchedulerImpl(scheduleRepository, eventRepository, taskRepository);
+                                           TaskRepository taskRepository,
+                                           WorkflowRepository workflowRepository) {
+        return new WakeupSchedulerImpl(scheduleRepository, eventRepository, taskRepository,
+                workflowRepository);
     }
 
     @Bean

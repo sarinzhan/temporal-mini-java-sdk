@@ -96,8 +96,11 @@ public final class EventLogImpl implements EventLog {
     }
 
     @Override
-    public void versionMarker(int seq, String changeId, int version) {
-        appendCommand(EventType.VERSION_MARKER, CommandType.VERSION, seq, null,
+    public void versionMarker(String changeId, int version) {
+        // Markers are looked up by changeId (see HistoryCursor.findVersionMarker) and must NOT occupy
+        // a seq slot — otherwise activity/sideEffect replay at the same seq would see a VERSION command
+        // and throw NonDeterminismException. seq stays null so they are invisible to seq-based replay.
+        appendCommand(EventType.VERSION_MARKER, CommandType.VERSION, null, null,
                 codec.encodeVersionMarker(changeId, version));
     }
 

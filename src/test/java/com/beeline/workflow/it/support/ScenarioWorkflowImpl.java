@@ -55,6 +55,17 @@ public class ScenarioWorkflowImpl implements ScenarioWorkflow {
                 yield reserved + "/" + charged;
             }
 
+            case "version" -> {
+                // getVersion followed by an activity: the trailing flaky activity parks and replays the
+                // whole turn. getVersion must return the same version every replay AND must not shift the
+                // activity's seq (the bug: it consumed a seq on the first turn but not on replay, so the
+                // activity drifted to the marker's old seq and replay threw NonDeterminismException).
+                int ver = Workflow.getVersion("order-flow", 1, 2);
+                String charged = Workflow.activity("flaky", opts, String.class,
+                        () -> activities.flaky(key, s.failTimes()));
+                yield "v" + ver + "/" + charged;
+            }
+
             case "sideEffect" -> {
                 // sideEffect must be recorded once and replayed; the trailing flaky activity forces
                 // replays. The test asserts the recorded value is stable and produced a single time.

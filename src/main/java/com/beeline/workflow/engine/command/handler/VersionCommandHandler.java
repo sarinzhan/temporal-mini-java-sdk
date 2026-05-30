@@ -22,6 +22,12 @@ public final class VersionCommandHandler implements CommandHandler<VersionComman
                     "minSupported > maxSupported: " + cmd.minSupported() + " > " + cmd.maxSupported());
         }
         ReplayState state = ctx.replayState();
+
+        // Version markers are keyed by changeId for the whole workflow, NOT by the per-command seq,
+        // and they deliberately do NOT consume the shared seq counter. The old code consumed a seq
+        // only on the write path but never on the replay-read path, so activity/sideEffect seq
+        // numbers drifted between the original turn and replay and triggered spurious
+        // NonDeterminismExceptions. Keeping getVersion out of the seq sequence makes it symmetric.
         OptionalInt existing = state.findVersion(cmd.changeId());
         if (existing.isPresent()) {
             int v = existing.getAsInt();
@@ -33,13 +39,13 @@ public final class VersionCommandHandler implements CommandHandler<VersionComman
             return v;
         }
 
-        // No marker. If in replay, this is an old workflow that pre-dates the call.
-        if (state.isInReplay()) {
+        // No marker for this changeId yet. If the workflow already ran past this point in an earlier
+        // turn (there is recorded command history ahead), this is old code that pre-dates the change
+        // → take the legacy path. Otherwise we are at the tip of history: record the marker once.
+        if (state.cursor().hasCommandsAhead()) {
             return Workflow.DEFAULT_VERSION;
         }
-
-        int seq = state.nextSeq();
-        ctx.eventLog().versionMarker(seq, cmd.changeId(), cmd.maxSupported());
+        ctx.eventLog().versionMarker(cmd.changeId(), cmd.maxSupported());
         return cmd.maxSupported();
     }
 }

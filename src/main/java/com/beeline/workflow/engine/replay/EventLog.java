@@ -28,7 +28,8 @@ public interface EventLog {
 
     void sideEffectRecorded(int seq, Object result);
 
-    void versionMarker(int seq, String changeId, int version);
+    /** Buffers a VERSION_MARKER. Markers are keyed by changeId, not seq, so they carry no seq. */
+    void versionMarker(String changeId, int version);
 
     // ── Workflow lifecycle (no seq) ─────────────────────────────────────────
 

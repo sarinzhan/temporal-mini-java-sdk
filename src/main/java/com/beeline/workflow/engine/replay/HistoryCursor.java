@@ -45,6 +45,18 @@ public final class HistoryCursor {
     /** True iff the command we just dispatched is being re-played from existing history. */
     public boolean isInReplay() { return seq <= maxHistorySeq; }
 
+    /**
+     * True iff recorded command history exists at a seq strictly higher than the cursor's current
+     * position — i.e. the workflow already ran past this point in an earlier turn. Used by
+     * {@code getVersion} to tell an old workflow that predates the change (→ DEFAULT_VERSION) apart
+     * from new code reaching a fresh version point at the tip of history (→ record the marker).
+     *
+     * <p>Unlike {@link #isInReplay()} this uses a strict {@code <}: at the very start of a brand-new
+     * workflow ({@code seq == maxHistorySeq == 0}) there is no history ahead, so a first-statement
+     * {@code getVersion} correctly records a marker instead of being misread as "replaying".
+     */
+    public boolean hasCommandsAhead() { return seq < maxHistorySeq; }
+
     /** True iff history has any event for this seq (regardless of type). */
     public boolean hasAnyEventForSeq(int targetSeq) {
         for (Event e : history) {

@@ -52,13 +52,15 @@ CREATE INDEX idx_events_version ON wflow.events (workflow_id, event_type)
 
 -- Guard against duplicate command outcomes: a given (workflow, seq, event_type) command event may
 -- appear at most once. Activities legitimately record multiple rows per seq across attempts
--- (STARTED/RETRY_SCHEDULED), so this uniqueness only covers the *terminal/marker* event types —
--- the ones replay treats as authoritative. A second writer (e.g. a duplicated turn after a crash)
--- trying to re-record a completion fails the INSERT instead of corrupting history.
+-- (STARTED/RETRY_SCHEDULED), so this uniqueness only covers the *terminal* event types — the ones
+-- replay treats as authoritative. A second writer (e.g. a duplicated turn after a crash) trying to
+-- re-record a completion fails the INSERT instead of corrupting history.
+-- NB: VERSION_MARKER is intentionally excluded — markers are keyed by changeId, carry no seq, and
+-- are deduplicated by the application (getVersion checks for an existing marker before writing).
 CREATE UNIQUE INDEX uq_events_terminal ON wflow.events (workflow_id, seq, event_type)
     WHERE seq IS NOT NULL AND event_type IN
         ('ACTIVITY_COMPLETED', 'ACTIVITY_FAILED', 'ACTIVITY_TIMEOUT',
-         'SIDE_EFFECT_RECORDED', 'VERSION_MARKER');
+         'SIDE_EFFECT_RECORDED');
 
 -- A workflow has at most one terminal lifecycle event.
 CREATE UNIQUE INDEX uq_events_workflow_terminal ON wflow.events (workflow_id, event_type)
