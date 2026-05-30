@@ -1,5 +1,5 @@
--- Beeline Workflow Engine — schema
--- Run manually before starting the application.
+-- Beeline Workflow Engine — initial schema.
+-- Applied by Flyway into the `wflow` schema (see WorkflowAutoConfiguration#workflowFlywayCustomizer).
 
 CREATE SCHEMA IF NOT EXISTS wflow;
 

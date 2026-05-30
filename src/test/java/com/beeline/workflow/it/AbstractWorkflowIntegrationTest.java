@@ -14,14 +14,10 @@ import com.beeline.workflow.spring.api.WorkflowHandle;
 import org.junit.jupiter.api.BeforeAll;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.time.Duration;
 import java.util.EnumSet;
 import java.util.List;
@@ -47,20 +43,9 @@ public abstract class AbstractWorkflowIntegrationTest {
 
     static {
         // Singleton-container pattern: started once, reused by every subclass, torn down at JVM exit.
+        // The schema itself is created by Flyway when the Spring context boots (Boot orders the
+        // migration before the JPA EntityManagerFactory), exactly as in production — no manual setup.
         POSTGRES.start();
-        // Create the schema up front — production assumes schema.sql is applied before the app boots
-        // (the engine's ApplicationRunner initializer only runs after refresh, too late for beans
-        // that touch the DB in @PostConstruct). Doing it here mirrors the production deployment.
-        applySchema();
-    }
-
-    private static void applySchema() {
-        try (Connection conn = DriverManager.getConnection(
-                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
-            ScriptUtils.executeSqlScript(conn, new ClassPathResource("schema.sql"));
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to apply schema.sql to test container", e);
-        }
     }
 
     @DynamicPropertySource

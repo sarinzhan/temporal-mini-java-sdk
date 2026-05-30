@@ -33,6 +33,7 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.flyway.autoconfigure.FlywayConfigurationCustomizer;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.hibernate.autoconfigure.HibernatePropertiesCustomizer;
 import org.springframework.context.ApplicationContext;
@@ -42,7 +43,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.PlatformTransactionManager;
 import tools.jackson.databind.ObjectMapper;
 
-import javax.sql.DataSource;
 import java.util.List;
 
 @AutoConfiguration
@@ -52,10 +52,24 @@ import java.util.List;
 @EntityScan(basePackages = "com.beeline.workflow.core.model")
 public class WorkflowAutoConfiguration {
 
+    /**
+     * Point Spring Boot's Flyway at the engine's own migrations. They live in their own location
+     * ({@code db/migration/wflow}) and own history table inside the {@code wflow} schema, so they
+     * never collide with an application's other migrations. Boot's {@code FlywayMigrationInitializer}
+     * runs them during context refresh and orders the JPA {@code EntityManagerFactory} after it, so
+     * every table exists before any bean touches the database. {@code baselineOnMigrate} lets an
+     * existing database (tables already created by the old bootstrap) adopt Flyway without re-running
+     * V1. Disable entirely with {@code spring.flyway.enabled=false} if you manage the schema yourself.
+     */
     @Bean
-    @ConditionalOnMissingBean
-    public WorkflowSchemaInitializer workflowSchemaInitializer(DataSource dataSource) {
-        return new WorkflowSchemaInitializer(dataSource);
+    @ConditionalOnMissingBean(name = "workflowFlywayCustomizer")
+    public FlywayConfigurationCustomizer workflowFlywayCustomizer() {
+        return config -> config
+                .schemas("wflow")
+                .defaultSchema("wflow")
+                .locations("classpath:db/migration/wflow")
+                .table("flyway_schema_history")
+                .baselineOnMigrate(true);
     }
 
     @Bean
