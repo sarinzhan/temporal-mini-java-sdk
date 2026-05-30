@@ -14,8 +14,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -68,13 +67,14 @@ public class WorkerLoopImpl implements WorkerLoop {
         int available = slots.availablePermits();
         if (available <= 0) return;
 
-        List<Task> claimed = claimBatch(available);
-        for (Task t : claimed) {
+        List<Claimed> claimed = claimBatch(available);
+        for (Claimed c : claimed) {
+            Task t = c.task();
             if (!slots.tryAcquire()) {
                 releaseClaim(t.getId());
                 continue;
             }
-            TaskLease lease = new TaskLease(t.getId(), t.getLockToken());
+            TaskLease lease = new TaskLease(t.getId(), c.token());
             running.put(t.getId(), lease);
             try {
                 workerPool.submit(() -> {
@@ -107,11 +107,11 @@ public class WorkerLoopImpl implements WorkerLoop {
     @Scheduled(fixedDelayString = "${workflow.lease-renew-interval-ms:20000}")
     public void renewLeases() {
         if (running.isEmpty()) return;
-        Instant until = Instant.now().plus(properties.getLockTimeoutSeconds(), ChronoUnit.SECONDS);
+        long ttlSeconds = properties.getLockTimeoutSeconds();
         for (TaskLease lease : running.values()) {
             if (lease.isLost()) continue;
             Integer renewed = transactionTemplate.execute(s ->
-                    taskRepository.renewLease(lease.taskId(), lease.token(), until));
+                    taskRepository.renewLease(lease.taskId(), lease.token(), ttlSeconds));
             if (renewed == null || renewed == 0) {
                 log.warn("Lease lost for task {} — another node reclaimed it; cancelling local work",
                         lease.taskId());
@@ -120,21 +120,27 @@ public class WorkerLoopImpl implements WorkerLoop {
         }
     }
 
-private List<Task> claimBatch(int batchSize) {
+    /** A task this node has won, paired with the lock token minted for the claim. */
+    private record Claimed(Task task, String token) {}
+
+    private List<Claimed> claimBatch(int batchSize) {
         return transactionTemplate.execute(s -> {
             List<Task> candidates = taskRepository.pollPending(batchSize);
-            if (candidates.isEmpty()) return Collections.<Task>emptyList();
-            Instant now = Instant.now();
-            Instant lockUntil = now.plus(properties.getLockTimeoutSeconds(), ChronoUnit.SECONDS);
+            if (candidates.isEmpty()) return Collections.<Claimed>emptyList();
+            long ttlSeconds = properties.getLockTimeoutSeconds();
+            String nodeId = properties.getInstanceId();
+            List<Claimed> claimed = new ArrayList<>(candidates.size());
             for (Task t : candidates) {
-                t.setStatus(TaskStatus.PROCESSING);
-                t.setLockedBy(properties.getInstanceId());
-                t.setLockedAt(now);
-                t.setLockedUntil(lockUntil);
-                t.setLockToken(UUID.randomUUID().toString());
+                // pollPending already holds a FOR UPDATE lock on this row inside this tx, so it is still
+                // PENDING here. claim() stamps all lock fields from the DB clock; we never mutate (and
+                // thus never JPA-flush) the managed entity, so the native version bump cannot collide.
+                String token = UUID.randomUUID().toString();
+                int updated = taskRepository.claim(t.getId(), nodeId, token, ttlSeconds);
+                if (updated == 1) {
+                    claimed.add(new Claimed(t, token));
+                }
             }
-            taskRepository.saveAll(candidates);
-            return candidates;
+            return claimed;
         });
     }
 

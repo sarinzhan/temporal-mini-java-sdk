@@ -32,16 +32,35 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     int resetStaleLocks();
 
     /**
-     * Extend the lease of a task we still own. Returns 1 if our token still matches (lease kept),
-     * 0 if the task was reclaimed by another node (we lost it).
+     * Atomically take ownership of a single PENDING task that {@link #pollPending} has already locked
+     * {@code FOR UPDATE} in this transaction. Every lock field is stamped from the DATABASE clock
+     * ({@code now()}), so lease expiry never depends on a worker node's wall clock — this removes the
+     * premature-reclaim risk under cross-node clock skew. Returns 1 on success, 0 if the row is no
+     * longer PENDING.
      */
     @Modifying
     @Query(value = """
             UPDATE wflow.tasks
-            SET locked_until = :until, version = version + 1
+            SET status = 'PROCESSING', locked_by = :nodeId, locked_at = now(),
+                locked_until = now() + make_interval(secs => :ttlSeconds),
+                lock_token = :token, version = version + 1
+            WHERE id = :id AND status = 'PENDING'
+            """, nativeQuery = true)
+    int claim(@Param("id") Long id, @Param("nodeId") String nodeId,
+              @Param("token") String token, @Param("ttlSeconds") long ttlSeconds);
+
+    /**
+     * Extend the lease of a task we still own. Returns 1 if our token still matches (lease kept),
+     * 0 if the task was reclaimed by another node (we lost it). The new expiry is computed from the
+     * DB clock so renewals stay immune to node clock skew.
+     */
+    @Modifying
+    @Query(value = """
+            UPDATE wflow.tasks
+            SET locked_until = now() + make_interval(secs => :ttlSeconds), version = version + 1
             WHERE id = :id AND lock_token = :token AND status = 'PROCESSING'
             """, nativeQuery = true)
-    int renewLease(@Param("id") Long id, @Param("token") String token, @Param("until") java.time.Instant until);
+    int renewLease(@Param("id") Long id, @Param("token") String token, @Param("ttlSeconds") long ttlSeconds);
 
     /**
      * Finalize a task only if we still own it (fencing). Returns 1 on success, 0 if the lease was
