@@ -5,6 +5,7 @@ import com.beeline.workflow.engine.command.ActivityCommand;
 import com.beeline.workflow.engine.command.CommandContext;
 import com.beeline.workflow.engine.command.SideEffectCommand;
 import com.beeline.workflow.engine.command.VersionCommand;
+import com.beeline.workflow.engine.context.ActivityExecutionContext;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
@@ -154,6 +155,23 @@ public final class Workflow {
      */
     public static int getVersion(String changeId, int minSupported, int maxSupported) {
         return (int) dispatch(new VersionCommand(changeId, minSupported, maxSupported));
+    }
+
+    // ── Activity idempotency (effectively-once) ──────────────────────────────
+    //
+    // Activities are at-least-once: a body may run more than once. To make external side effects
+    // effectively-once, pass the stable key below to the downstream system and let it deduplicate.
+    // The key is identical on every retry and every replay of the same activity. These accessors are
+    // only valid from INSIDE an activity body (they read a ThreadLocal bound on the activity thread).
+
+    /** Stable idempotency key ({@code wf:<workflowId>:<seq>}) for the activity currently executing. */
+    public static String currentActivityKey() {
+        return ActivityExecutionContext.require().idempotencyKey();
+    }
+
+    /** Full context (workflowId, seq, attempt, idempotencyKey) of the activity currently executing. */
+    public static ActivityExecution currentActivity() {
+        return ActivityExecutionContext.require();
     }
 
     private static Object dispatch(com.beeline.workflow.engine.command.WorkflowCommand cmd) {

@@ -1,5 +1,6 @@
 package com.beeline.workflow.it.support;
 
+import com.beeline.workflow.core.api.Workflow;
 import com.beeline.workflow.core.exception.NonRetryableException;
 import org.springframework.stereotype.Service;
 
@@ -24,6 +25,7 @@ public class TestActivities {
 
     private final Map<String, AtomicInteger> invocations = new ConcurrentHashMap<>();
     private final Map<String, List<String>> sideEffectValues = new ConcurrentHashMap<>();
+    private final Map<String, List<String>> observedKeys = new ConcurrentHashMap<>();
 
     /** How many times the named activity actually executed for this scenario key. */
     public int invocationCount(String key, String activity) {
@@ -51,6 +53,22 @@ public class TestActivities {
             throw new RuntimeException("flaky boom on attempt " + attempt);
         }
         return "OK-" + key + "-" + attempt;
+    }
+
+    /**
+     * Like {@link #flaky} but first records {@link Workflow#currentActivityKey()} on EVERY execution
+     * (including the failing attempts). Lets a test prove the idempotency key is visible inside the
+     * body and identical across retries/replays.
+     */
+    public String flakyRecordingKey(String key, int failTimes) {
+        observedKeys.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>()))
+                .add(Workflow.currentActivityKey());
+        return flaky(key, failTimes);
+    }
+
+    /** Idempotency keys observed by {@link #flakyRecordingKey} for this scenario key (one per real run). */
+    public List<String> observedKeys(String key) {
+        return observedKeys.getOrDefault(key, List.of());
     }
 
     /** Always throws a retryable exception. */

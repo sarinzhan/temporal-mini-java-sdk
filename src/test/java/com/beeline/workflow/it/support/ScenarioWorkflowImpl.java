@@ -55,6 +55,9 @@ public class ScenarioWorkflowImpl implements ScenarioWorkflow {
                 yield reserved + "/" + charged;
             }
 
+            case "idempotencyKey" -> Workflow.activity("flaky", opts, String.class,
+                    () -> activities.flakyRecordingKey(key, s.failTimes()));
+
             case "version" -> {
                 // getVersion followed by an activity: the trailing flaky activity parks and replays the
                 // whole turn. getVersion must return the same version every replay AND must not shift the

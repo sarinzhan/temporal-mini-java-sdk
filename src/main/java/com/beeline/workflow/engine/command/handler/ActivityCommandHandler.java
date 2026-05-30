@@ -1,5 +1,6 @@
 package com.beeline.workflow.engine.command.handler;
 
+import com.beeline.workflow.core.api.ActivityExecution;
 import com.beeline.workflow.core.config.ActivityOptions;
 import com.beeline.workflow.core.config.RetryPolicy;
 import com.beeline.workflow.core.exception.ActivityFailureException;
@@ -7,6 +8,7 @@ import com.beeline.workflow.core.exception.ActivityTimeoutException;
 import com.beeline.workflow.engine.command.ActivityCommand;
 import com.beeline.workflow.engine.command.CommandContext;
 import com.beeline.workflow.engine.command.CommandHandler;
+import com.beeline.workflow.engine.context.ActivityExecutionContext;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
 import com.beeline.workflow.engine.replay.ActivityReplay;
 import com.beeline.workflow.engine.replay.CommandType;
@@ -123,9 +125,20 @@ public final class ActivityCommandHandler implements CommandHandler<ActivityComm
 
         // Reserve a pool slot BEFORE recording ACTIVITY_STARTED. If the pool is saturated the submit
         // is rejected and the activity never runs, so we must not burn an attempt on it — park instead.
+        // Bind the activity context on the POOL thread (not this worker thread) so the body can read
+        // its stable idempotency key via Workflow.currentActivityKey(); clear it so the pooled thread
+        // never leaks it into the next activity.
+        ActivityExecution exec = new ActivityExecution(workflowId, seq, attempt);
         Future<Object> future;
         try {
-            future = invocationPool.submit(cmd.body()::get);
+            future = invocationPool.submit(() -> {
+                ActivityExecutionContext.set(exec);
+                try {
+                    return cmd.body().get();
+                } finally {
+                    ActivityExecutionContext.clear();
+                }
+            });
         } catch (RejectedExecutionException rejected) {
             return parkForBackpressure(ctx, workflowId, seq, display, attempt);
         }

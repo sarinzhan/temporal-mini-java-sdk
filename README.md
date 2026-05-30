@@ -157,6 +157,25 @@ public class OrderWorkflowImpl implements OrderWorkflow {
 `Workflow.getVersion(...)`. Всё остальное в методе workflow должно быть детерминированным; внешний
 мир — только через активности.
 
+### Идемпотентность активностей (effectively-once)
+Активности выполняются **at-least-once**: тело может запуститься больше одного раза (ретрай; повтор
+при крахе в окне «эффект сделан, но `ACTIVITY_COMPLETED` ещё не записан»; редкий конкурентный дубль
+от двух задач одного workflow в кластере). Истинный exactly-once через границу процесса невозможен —
+нельзя в одной транзакции и сделать внешний вызов, и зафиксировать факт у себя.
+
+Практическое решение — **effectively-once через идемпотентность**: движок даёт каждой активности
+стабильный ключ `Workflow.currentActivityKey()` вида `wf:<workflowId>:<seq>`, **одинаковый на всех
+ретраях и реплеях** одной и той же активности. Передайте его во внешнюю систему как ключ дедупликации:
+
+```java
+String txnId = Workflow.activity("charge", opts, String.class,
+        () -> payments.charge(orderId, Workflow.currentActivityKey())); // Idempotency-Key
+```
+
+Гарантия «ровно один эффект» держится только если **принимающая сторона дедуплицирует** по этому
+ключу (например `Idempotency-Key` у платёжного провайдера или `INSERT ... ON CONFLICT DO NOTHING`).
+`Workflow.currentActivityKey()`/`currentActivity()` доступны только **изнутри тела активности**.
+
 ---
 
 ## Запуск и чтение
