@@ -8,7 +8,6 @@ import com.beeline.workflow.engine.command.WorkflowCommand;
 import com.beeline.workflow.engine.command.handler.ActivityCommandHandler;
 import com.beeline.workflow.engine.command.handler.SideEffectCommandHandler;
 import com.beeline.workflow.engine.command.handler.VersionCommandHandler;
-import com.beeline.workflow.engine.lifecycle.WorkflowLifecycleWriter;
 import com.beeline.workflow.engine.lifecycle.WorkflowOutcomeMapper;
 import com.beeline.workflow.engine.replay.EventLogFactory;
 import com.beeline.workflow.engine.retry.RetryDecider;
@@ -16,6 +15,7 @@ import com.beeline.workflow.engine.scheduler.TimeoutWatcher;
 import com.beeline.workflow.engine.scheduler.TimeoutWatcherImpl;
 import com.beeline.workflow.engine.scheduler.WakeupScheduler;
 import com.beeline.workflow.engine.scheduler.WakeupSchedulerImpl;
+import com.beeline.workflow.engine.turn.TurnCommitter;
 import com.beeline.workflow.engine.turn.WorkflowTurnRunner;
 import com.beeline.workflow.engine.worker.WorkerLoop;
 import com.beeline.workflow.engine.worker.WorkerLoopImpl;
@@ -82,31 +82,33 @@ public class WorkflowAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public EventLogFactory eventLogFactory(EventRepository eventRepository,
-                                           ScheduleRepository scheduleRepository,
-                                           PlatformTransactionManager transactionManager,
-                                           PayloadCodec codec) {
-        return new EventLogFactory(eventRepository, scheduleRepository, transactionManager, codec);
+    public EventLogFactory eventLogFactory(PayloadCodec codec) {
+        return new EventLogFactory(codec);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public WorkflowLifecycleWriter workflowLifecycleWriter(WorkflowRepository workflowRepository,
-                                                           PlatformTransactionManager transactionManager,
-                                                           PayloadCodec codec) {
-        return new WorkflowLifecycleWriter(workflowRepository, transactionManager, codec);
+    public TurnCommitter turnCommitter(EventRepository eventRepository,
+                                       ScheduleRepository scheduleRepository,
+                                       TaskRepository taskRepository,
+                                       WorkflowRepository workflowRepository,
+                                       PlatformTransactionManager transactionManager) {
+        return new TurnCommitter(eventRepository, scheduleRepository, taskRepository,
+                workflowRepository, transactionManager);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public WorkflowOutcomeMapper workflowOutcomeMapper(WorkflowLifecycleWriter lifecycle, PayloadCodec codec) {
-        return new WorkflowOutcomeMapper(lifecycle, codec);
+    public WorkflowOutcomeMapper workflowOutcomeMapper(PayloadCodec codec) {
+        return new WorkflowOutcomeMapper(codec);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public ActivityCommandHandler activityCommandHandler(RetryDecider retryDecider) {
-        return new ActivityCommandHandler(retryDecider);
+    public ActivityCommandHandler activityCommandHandler(RetryDecider retryDecider,
+                                                         WorkflowProperties properties) {
+        return new ActivityCommandHandler(retryDecider, (name, opts) -> opts,
+                properties.getActivityMaxThreads());
     }
 
     @Bean
@@ -135,11 +137,11 @@ public class WorkflowAutoConfiguration {
                                                  ObjectMapper objectMapper,
                                                  PayloadCodec codec,
                                                  EventLogFactory eventLogFactory,
-                                                 WorkflowLifecycleWriter lifecycle,
                                                  WorkflowOutcomeMapper outcomeMapper,
-                                                 CommandDispatcher dispatcher) {
+                                                 CommandDispatcher dispatcher,
+                                                 TurnCommitter turnCommitter) {
         return new WorkflowTurnRunner(workflowRegistry, workflowRepository, eventRepository,
-                objectMapper, codec, eventLogFactory, lifecycle, outcomeMapper, dispatcher);
+                objectMapper, codec, eventLogFactory, outcomeMapper, dispatcher, turnCommitter);
     }
 
     @Bean

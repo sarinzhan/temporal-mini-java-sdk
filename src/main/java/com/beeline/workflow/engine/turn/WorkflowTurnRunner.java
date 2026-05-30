@@ -2,20 +2,22 @@ package com.beeline.workflow.engine.turn;
 
 import com.beeline.workflow.core.model.Event;
 import com.beeline.workflow.core.model.Task;
+import com.beeline.workflow.core.model.TaskStatus;
 import com.beeline.workflow.core.model.WorkflowInstance;
 import com.beeline.workflow.engine.codec.PayloadCodec;
 import com.beeline.workflow.engine.command.CommandContext;
 import com.beeline.workflow.engine.command.CommandDispatcher;
 import com.beeline.workflow.engine.context.WorkflowContextHolder;
-import com.beeline.workflow.engine.lifecycle.WorkflowLifecycleWriter;
+import com.beeline.workflow.engine.lifecycle.TurnResult;
 import com.beeline.workflow.engine.lifecycle.WorkflowOutcomeMapper;
-import com.beeline.workflow.engine.replay.EventLog;
+import com.beeline.workflow.engine.replay.EventLogImpl;
 import com.beeline.workflow.engine.replay.EventLogFactory;
 import com.beeline.workflow.engine.replay.HistoryCursor;
 import com.beeline.workflow.engine.replay.LockLostException;
 import com.beeline.workflow.engine.replay.ReplayState;
 import com.beeline.workflow.engine.replay.ReplayStateImpl;
 import com.beeline.workflow.engine.replay.TaskLease;
+import com.beeline.workflow.engine.turn.TurnCommitter.WorkflowMutation;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
 import com.beeline.workflow.registry.WorkflowRegistry;
@@ -28,9 +30,11 @@ import java.lang.reflect.Type;
 import java.util.List;
 
 /**
- * Drives one workflow decision turn. Thin orchestration: load the workflow, build the per-turn
- * scaffolding ({@link ReplayState}, {@link EventLog}, {@link CommandContext}), invoke the entry
- * method, and let {@link WorkflowOutcomeMapper} turn the result/exception into an {@link Outcome}.
+ * Drives one workflow decision turn. The entry method (and its inline activities) run with NO open
+ * DB transaction — all writes are buffered in the {@link EventLogImpl}. When the turn ends (normal
+ * completion, terminal failure, or a retry park), the whole buffer plus the workflow status and the
+ * task finalization are flushed atomically by {@link TurnCommitter}. A crash before that commit
+ * leaves no partial history; the lease expires and the turn replays cleanly.
  */
 public final class WorkflowTurnRunner {
 
@@ -42,9 +46,9 @@ public final class WorkflowTurnRunner {
     private final ObjectMapper objectMapper;
     private final PayloadCodec codec;
     private final EventLogFactory eventLogFactory;
-    private final WorkflowLifecycleWriter lifecycle;
     private final WorkflowOutcomeMapper outcomeMapper;
     private final CommandDispatcher dispatcher;
+    private final TurnCommitter committer;
 
     public WorkflowTurnRunner(WorkflowRegistry workflowRegistry,
                               WorkflowRepository workflowRepository,
@@ -52,18 +56,18 @@ public final class WorkflowTurnRunner {
                               ObjectMapper objectMapper,
                               PayloadCodec codec,
                               EventLogFactory eventLogFactory,
-                              WorkflowLifecycleWriter lifecycle,
                               WorkflowOutcomeMapper outcomeMapper,
-                              CommandDispatcher dispatcher) {
+                              CommandDispatcher dispatcher,
+                              TurnCommitter committer) {
         this.workflowRegistry = workflowRegistry;
         this.workflowRepository = workflowRepository;
         this.eventRepository = eventRepository;
         this.objectMapper = objectMapper;
         this.codec = codec;
         this.eventLogFactory = eventLogFactory;
-        this.lifecycle = lifecycle;
         this.outcomeMapper = outcomeMapper;
         this.dispatcher = dispatcher;
+        this.committer = committer;
     }
 
     public Outcome run(Task task, TaskLease lease) {
@@ -75,45 +79,43 @@ public final class WorkflowTurnRunner {
 
         Object bean = workflowRegistry.createInstance(wf.getWorkflowType());
         if (bean == null) {
-            lifecycle.markFailed(wf, "Unknown workflow type: " + wf.getWorkflowType(), lease);
-            return Outcome.FAILED;
+            return failFast(wf, task, lease, "Unknown workflow type: " + wf.getWorkflowType());
         }
 
         Method entryMethod = workflowRegistry.getEntryMethod(wf.getWorkflowType());
         if (entryMethod == null) {
-            lifecycle.markFailed(wf, "No @WorkflowMethod registered for type: " + wf.getWorkflowType(), lease);
-            return Outcome.FAILED;
+            return failFast(wf, task, lease, "No @WorkflowMethod registered for type: " + wf.getWorkflowType());
         }
 
         Object[] callArgs;
         try {
             callArgs = buildCallArgs(entryMethod, wf.getInput());
         } catch (Exception ex) {
-            lifecycle.markFailed(wf, "Failed to deserialize workflow input: " + ex.getMessage(), lease);
-            return Outcome.FAILED;
+            return failFast(wf, task, lease, "Failed to deserialize workflow input: " + ex.getMessage());
         }
 
         // Load history *before* writing TASK_STARTED so the cursor only sees prior turns.
         List<Event> history = eventRepository.findByWorkflowIdOrderByIdAsc(wf.getId());
         HistoryCursor cursor = new HistoryCursor(wf.getId(), history, objectMapper);
         ReplayState replayState = new ReplayStateImpl(cursor, codec);
-        EventLog eventLog = eventLogFactory.create(wf.getId(), lease);
+        EventLogImpl eventLog = eventLogFactory.create(wf.getId(), lease);
 
-        lifecycle.markRunning(wf, lease);
         eventLog.workflowTaskStarted();
 
         CommandContext ctx = new CommandContext(wf.getId(), task.getId(),
                 replayState, eventLog, lease, codec, dispatcher);
         WorkflowContextHolder.set(ctx);
+
+        TurnResult result;
         try {
-            Object result = entryMethod.invoke(bean, callArgs);
-            return outcomeMapper.onCompleted(wf, result, eventLog, lease);
+            Object value = entryMethod.invoke(bean, callArgs);
+            result = outcomeMapper.onCompleted(wf, value, eventLog);
         } catch (LockLostException lost) {
             log.warn("[{}] lock lost during turn — discarding writes, another node owns the task", wf.getId());
             return Outcome.LOST;
         } catch (Throwable thrown) {
             try {
-                return outcomeMapper.onThrown(wf, thrown, eventLog, lease);
+                result = outcomeMapper.onThrown(wf, thrown, eventLog);
             } catch (LockLostException lost) {
                 log.warn("[{}] lock lost during turn — discarding writes, another node owns the task", wf.getId());
                 return Outcome.LOST;
@@ -121,6 +123,30 @@ public final class WorkflowTurnRunner {
         } finally {
             WorkflowContextHolder.clear();
         }
+
+        boolean committed = committer.commit(wf.getId(), lease, eventLog, result.mutation(), result.taskStatus());
+        if (!committed) {
+            return Outcome.LOST;
+        }
+        return result.outcome();
+    }
+
+    /**
+     * Engine-level failure before any workflow code runs (unknown type, bad input). Buffers a
+     * WORKFLOW_FAILED + WORKFLOW_TASK_FAILED and commits atomically with the task marked DEAD.
+     */
+    private Outcome failFast(WorkflowInstance wf, Task task, TaskLease lease, String error) {
+        EventLogImpl eventLog = eventLogFactory.create(wf.getId(), lease);
+        try {
+            eventLog.workflowTaskStarted();
+            eventLog.workflowFailed(error);
+            eventLog.workflowTaskFailed(error);
+        } catch (LockLostException lost) {
+            return Outcome.LOST;
+        }
+        boolean committed = committer.commit(wf.getId(), lease, eventLog,
+                WorkflowMutation.failed(error), TaskStatus.DEAD);
+        return committed ? Outcome.FAILED : Outcome.LOST;
     }
 
     private Object[] buildCallArgs(Method entryMethod, String inputJson) {

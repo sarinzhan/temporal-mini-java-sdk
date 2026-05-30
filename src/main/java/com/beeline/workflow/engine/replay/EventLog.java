@@ -18,7 +18,10 @@ public interface EventLog {
 
     void activityFailed(int seq, String name, int attempt, String reason);
 
-    /** Atomically writes ACTIVITY_RETRY_SCHEDULED + the wflow.schedule row in one transaction. */
+    /** Terminal failure caused specifically by a start-to-close timeout. */
+    void activityTimedOut(int seq, String name, int attempt, String reason);
+
+    /** Buffers ACTIVITY_RETRY_SCHEDULED + the wflow.schedule row; flushed atomically at commit. */
     void activityRetryScheduled(int seq, String name, int attempt, Instant fireAt, String reason);
 
     // ── SideEffect / Version ────────────────────────────────────────────────
@@ -32,6 +35,9 @@ public interface EventLog {
     void workflowTaskStarted();
 
     void workflowTaskCompleted();
+
+    /** A decision turn that ended by failing the workflow (vs. completing it). */
+    void workflowTaskFailed(String reason);
 
     void workflowCompleted(String resultJson);
 

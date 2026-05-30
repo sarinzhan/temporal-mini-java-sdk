@@ -155,7 +155,10 @@ private List<Task> claimBatch(int batchSize) {
         Outcome outcome;
         try {
             // Every task drives a workflow decision turn; the entry method (and any inline activities)
-            // run on this worker thread to completion or until a retry parks the turn.
+            // run on this worker thread to completion or until a retry parks the turn. The turn's
+            // writes — events, workflow status, AND the task finalization — are committed atomically
+            // inside turnRunner.run via TurnCommitter, fenced by our lock token. So for COMPLETED /
+            // PARKED / FAILED the task is already finalized here; nothing more to do.
             outcome = turnRunner.run(task, lease);
         } catch (Exception ex) {
             if (lease.isLost()) {
@@ -166,41 +169,41 @@ private List<Task> claimBatch(int batchSize) {
                 outcome = Outcome.FAILED;
             }
         } finally {
-            // Stop renewing and detaching the thread BEFORE we finalize, so a late renewal can
-            // neither extend a finishing task nor interrupt this thread once it moves to the next one.
+            // Stop renewing and detach the thread, so a late renewal can neither extend a finishing
+            // task nor interrupt this thread once it moves to the next one.
             running.remove(task.getId());
             lease.bindThread(null);
         }
-        finalizeTask(lease, outcome);
+        finalizeOrphanedTask(lease, outcome);
     }
 
-    private void finalizeTask(TaskLease lease, Outcome outcome) {
-        if (outcome == Outcome.LOST) {
-            log.warn("Task {} finalize skipped — lease lost, the reclaiming node owns it now", lease.taskId());
-            return;
+    /**
+     * The turn committer finalizes the task atomically for COMPLETED / PARKED / FAILED, and leaves
+     * it alone for LOST. The only case the committer never reaches is UNKNOWN (the workflow row was
+     * missing, so no turn ran and nothing was committed) or an unexpected exception escaping the
+     * runner — in those we still own the lock and must mark the task DEAD so it isn't reprocessed
+     * forever.
+     */
+    private void finalizeOrphanedTask(TaskLease lease, Outcome outcome) {
+        if (outcome != Outcome.UNKNOWN && outcome != Outcome.FAILED) {
+            return;  // COMPLETED / PARKED / FAILED-via-commit / LOST: already handled by the committer
         }
-        TaskStatus status = switch (outcome) {
-            case COMPLETED, PARKED -> TaskStatus.DONE;
-            case FAILED, UNKNOWN -> TaskStatus.DEAD;
-            case LOST -> null;  // unreachable, handled above
-        };
-        // Fenced finalize: only writes if we still own the lock. Returns 0 if the lease was lost
-        // mid-turn, in which case we must not overwrite the new owner's state.
         Integer updated = transactionTemplate.execute(s ->
-                taskRepository.finalizeIfOwned(lease.taskId(), lease.token(), status.name()));
+                taskRepository.finalizeIfOwned(lease.taskId(), lease.token(), TaskStatus.DEAD.name()));
         if (updated == null || updated == 0) {
-            log.warn("Task {} finalize skipped — lease lost to another node", lease.taskId());
+            // Either already finalized by the committer (FAILED) or the lease was lost — both fine.
+            log.debug("Task {} orphan-finalize no-op (already finalized or lease lost)", lease.taskId());
         }
     }
 
     public PoolSnapshot getPoolStats() {
         int max = Math.max(1, properties.getWorkerPoolSize());
-        int active = max;
+        // Concurrency is gated by the semaphore, not the pool size — report the truth: how many
+        // slots are in use right now (== tasks this node is actively processing).
+        int active = max - slots.availablePermits();
         int queue = 0;
         if (workerPool instanceof ThreadPoolExecutor tpe) {
-            active = tpe.getActiveCount();
             queue = tpe.getQueue().size();
-            max = tpe.getMaximumPoolSize();
         }
         return new PoolSnapshot(active, queue, max);
     }

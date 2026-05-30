@@ -12,7 +12,8 @@ CREATE TABLE wflow.workflows (
     error         TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    completed_at  TIMESTAMPTZ
+    completed_at  TIMESTAMPTZ,
+    version       BIGINT       NOT NULL DEFAULT 0   -- @Version optimistic-lock fence
 );
 
 CREATE TABLE wflow.tasks (
@@ -26,7 +27,8 @@ CREATE TABLE wflow.tasks (
     locked_until TIMESTAMPTZ,
     locked_at    TIMESTAMPTZ,
     lock_token   VARCHAR(64),                -- fencing token: unique per claim, checked before every write
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    version      BIGINT       NOT NULL DEFAULT 0   -- @Version optimistic-lock fence
 );
 
 CREATE INDEX idx_tasks_poll ON wflow.tasks (status, scheduled_at)
@@ -47,6 +49,20 @@ CREATE TABLE wflow.events (
 CREATE INDEX idx_events_replay ON wflow.events (workflow_id, id);
 CREATE INDEX idx_events_version ON wflow.events (workflow_id, event_type)
     WHERE event_type = 'VERSION_MARKER';
+
+-- Guard against duplicate command outcomes: a given (workflow, seq, event_type) command event may
+-- appear at most once. Activities legitimately record multiple rows per seq across attempts
+-- (STARTED/RETRY_SCHEDULED), so this uniqueness only covers the *terminal/marker* event types —
+-- the ones replay treats as authoritative. A second writer (e.g. a duplicated turn after a crash)
+-- trying to re-record a completion fails the INSERT instead of corrupting history.
+CREATE UNIQUE INDEX uq_events_terminal ON wflow.events (workflow_id, seq, event_type)
+    WHERE seq IS NOT NULL AND event_type IN
+        ('ACTIVITY_COMPLETED', 'ACTIVITY_FAILED', 'ACTIVITY_TIMEOUT',
+         'SIDE_EFFECT_RECORDED', 'VERSION_MARKER');
+
+-- A workflow has at most one terminal lifecycle event.
+CREATE UNIQUE INDEX uq_events_workflow_terminal ON wflow.events (workflow_id, event_type)
+    WHERE event_type IN ('WORKFLOW_COMPLETED', 'WORKFLOW_FAILED');
 
 -- Schedule of future workflow wake-ups (e.g. activity retry backoff). Source of truth stays in
 -- events; a row here only controls *when* a parked workflow is re-enqueued.

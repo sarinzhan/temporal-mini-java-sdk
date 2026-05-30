@@ -8,6 +8,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.Getter;
 import lombok.Setter;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -56,4 +57,9 @@ public class Task {
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
+
+    /** Optimistic-lock fence for concurrent claim/finalize races; see WorkflowInstance.version. */
+    @Version
+    @Column(name = "version", nullable = false)
+    private long version;
 }

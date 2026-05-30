@@ -4,39 +4,47 @@ import com.beeline.workflow.core.model.Event;
 import com.beeline.workflow.core.model.EventType;
 import com.beeline.workflow.core.model.Schedule;
 import com.beeline.workflow.engine.codec.PayloadCodec;
-import com.beeline.workflow.persistence.repository.EventRepository;
-import com.beeline.workflow.persistence.repository.ScheduleRepository;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Per-turn EventLog: bound to one (workflowId, lease) and writes through the shared
- * {@link EventRepository}/{@link ScheduleRepository} with a {@link TransactionTemplate}. Every
- * write fences via {@link TaskLease#assertOwned()} so a stale worker can never persist after
- * its lease was reclaimed.
+ * Per-turn EventLog that <b>buffers</b> all writes in memory. Nothing is persisted while the
+ * workflow entry method runs — activities can take a long time and we must not hold a DB
+ * transaction open for the whole turn. At the end of the turn the {@code WorkflowTurnRunner}
+ * flushes the buffer atomically (events + schedule rows + workflow status + task finalize) in a
+ * single fenced transaction; see {@code TurnCommitter}.
+ *
+ * <p>Every append still fences via {@link TaskLease#assertOwned()} so a worker that has already
+ * lost its lease stops producing events immediately (fail-fast), and the SQL-level fence at commit
+ * time is the durable guarantee.
+ *
+ * <p>Not thread-safe — one turn runs on a single worker thread.
  */
 public final class EventLogImpl implements EventLog {
 
     private final Long workflowId;
     private final TaskLease lease;
-    private final EventRepository eventRepository;
-    private final ScheduleRepository scheduleRepository;
-    private final TransactionTemplate transactionTemplate;
     private final PayloadCodec codec;
 
-    public EventLogImpl(Long workflowId,
-                        TaskLease lease,
-                        EventRepository eventRepository,
-                        ScheduleRepository scheduleRepository,
-                        TransactionTemplate transactionTemplate,
-                        PayloadCodec codec) {
+    private final List<Event> bufferedEvents = new ArrayList<>();
+    private final List<Schedule> bufferedSchedules = new ArrayList<>();
+
+    public EventLogImpl(Long workflowId, TaskLease lease, PayloadCodec codec) {
         this.workflowId = workflowId;
         this.lease = lease;
-        this.eventRepository = eventRepository;
-        this.scheduleRepository = scheduleRepository;
-        this.transactionTemplate = transactionTemplate;
         this.codec = codec;
+    }
+
+    /** Events accumulated this turn, in append order. Flushed by the committer. */
+    public List<Event> bufferedEvents() {
+        return bufferedEvents;
+    }
+
+    /** Schedule rows accumulated this turn (activity retry backoff wake-ups). */
+    public List<Schedule> bufferedSchedules() {
+        return bufferedSchedules;
     }
 
     // ── Activity ────────────────────────────────────────────────────────────
@@ -60,19 +68,23 @@ public final class EventLogImpl implements EventLog {
     }
 
     @Override
+    public void activityTimedOut(int seq, String name, int attempt, String reason) {
+        appendActivity(EventType.ACTIVITY_TIMEOUT, seq, name,
+                codec.encodeActivityFailed(attempt, reason));
+    }
+
+    @Override
     public void activityRetryScheduled(int seq, String name, int attempt, Instant fireAt, String reason) {
         lease.assertOwned();
-        transactionTemplate.executeWithoutResult(s -> {
-            eventRepository.save(activityEvent(EventType.ACTIVITY_RETRY_SCHEDULED, seq, name,
-                    codec.encodeActivityRetryScheduled(attempt, fireAt, reason)));
-            Schedule sched = new Schedule();
-            sched.setWorkflowId(workflowId);
-            sched.setSeq(seq);
-            sched.setFireAt(fireAt);
-            sched.setReason("retry " + name + " attempt " + attempt);
-            sched.setProcessed(false);
-            scheduleRepository.save(sched);
-        });
+        bufferedEvents.add(activityEvent(EventType.ACTIVITY_RETRY_SCHEDULED, seq, name,
+                codec.encodeActivityRetryScheduled(attempt, fireAt, reason)));
+        Schedule sched = new Schedule();
+        sched.setWorkflowId(workflowId);
+        sched.setSeq(seq);
+        sched.setFireAt(fireAt);
+        sched.setReason("retry " + name + " attempt " + attempt);
+        sched.setProcessed(false);
+        bufferedSchedules.add(sched);
     }
 
     // ── SideEffect / Version ────────────────────────────────────────────────
@@ -102,13 +114,18 @@ public final class EventLogImpl implements EventLog {
     }
 
     @Override
+    public void workflowTaskFailed(String reason) {
+        appendLifecycle(EventType.WORKFLOW_TASK_FAILED, codec.encodeReason(reason));
+    }
+
+    @Override
     public void workflowCompleted(String resultJson) {
         appendLifecycle(EventType.WORKFLOW_COMPLETED, resultJson);
     }
 
     @Override
     public void workflowFailed(String reason) {
-        appendLifecycle(EventType.WORKFLOW_FAILED, reason);
+        appendLifecycle(EventType.WORKFLOW_FAILED, codec.encodeReason(reason));
     }
 
     @Override
@@ -118,7 +135,7 @@ public final class EventLogImpl implements EventLog {
 
     @Override
     public void workflowTaskQueued(String reason) {
-        appendLifecycle(EventType.WORKFLOW_TASK_QUEUED, "{\"reason\":\"" + reason + "\"}");
+        appendLifecycle(EventType.WORKFLOW_TASK_QUEUED, codec.encodeReason(reason));
     }
 
     // ── internals ───────────────────────────────────────────────────────────
@@ -129,27 +146,23 @@ public final class EventLogImpl implements EventLog {
 
     private void appendCommand(EventType type, CommandType cmd, Integer seq, String name, String payload) {
         lease.assertOwned();
-        transactionTemplate.executeWithoutResult(s -> {
-            Event e = new Event();
-            e.setWorkflowId(workflowId);
-            e.setEventType(type);
-            e.setCommandType(cmd != null ? cmd.name() : null);
-            e.setSeq(seq);
-            e.setActivityName(name);
-            e.setPayload(payload);
-            eventRepository.save(e);
-        });
+        Event e = new Event();
+        e.setWorkflowId(workflowId);
+        e.setEventType(type);
+        e.setCommandType(cmd != null ? cmd.name() : null);
+        e.setSeq(seq);
+        e.setActivityName(name);
+        e.setPayload(payload);
+        bufferedEvents.add(e);
     }
 
     private void appendLifecycle(EventType type, String payload) {
         lease.assertOwned();
-        transactionTemplate.executeWithoutResult(s -> {
-            Event e = new Event();
-            e.setWorkflowId(workflowId);
-            e.setEventType(type);
-            e.setPayload(payload);
-            eventRepository.save(e);
-        });
+        Event e = new Event();
+        e.setWorkflowId(workflowId);
+        e.setEventType(type);
+        e.setPayload(payload);
+        bufferedEvents.add(e);
     }
 
     private Event activityEvent(EventType type, int seq, String name, String payload) {

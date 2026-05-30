@@ -18,6 +18,9 @@ public class WorkflowProperties implements InitializingBean {
     public int getWorkerPoolSize() { return workerPoolSize; }
     public void setWorkerPoolSize(int v) { this.workerPoolSize = v; }
 
+    public int getActivityMaxThreads() { return activityMaxThreads; }
+    public void setActivityMaxThreads(int v) { this.activityMaxThreads = v; }
+
     public long getPollIntervalMs() { return pollIntervalMs; }
     public void setPollIntervalMs(long v) { this.pollIntervalMs = v; }
 

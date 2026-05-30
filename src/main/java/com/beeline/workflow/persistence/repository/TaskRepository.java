@@ -25,7 +25,8 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Modifying
     @Query(value = """
             UPDATE wflow.tasks
-            SET status = 'PENDING', locked_by = NULL, locked_at = NULL, locked_until = NULL, lock_token = NULL
+            SET status = 'PENDING', locked_by = NULL, locked_at = NULL, locked_until = NULL,
+                lock_token = NULL, version = version + 1
             WHERE status = 'PROCESSING' AND locked_until < now()
             """, nativeQuery = true)
     int resetStaleLocks();
@@ -37,7 +38,7 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Modifying
     @Query(value = """
             UPDATE wflow.tasks
-            SET locked_until = :until
+            SET locked_until = :until, version = version + 1
             WHERE id = :id AND lock_token = :token AND status = 'PROCESSING'
             """, nativeQuery = true)
     int renewLease(@Param("id") Long id, @Param("token") String token, @Param("until") java.time.Instant until);
@@ -49,7 +50,8 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Modifying
     @Query(value = """
             UPDATE wflow.tasks
-            SET status = :status, locked_by = NULL, locked_at = NULL, locked_until = NULL, lock_token = NULL
+            SET status = :status, locked_by = NULL, locked_at = NULL, locked_until = NULL,
+                lock_token = NULL, version = version + 1
             WHERE id = :id AND lock_token = :token
             """, nativeQuery = true)
     int finalizeIfOwned(@Param("id") Long id, @Param("token") String token, @Param("status") String status);
@@ -60,6 +62,19 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
             ORDER BY locked_at ASC
             """, nativeQuery = true)
     List<Task> findRunningByNode(@Param("nodeId") String nodeId);
+
+    /**
+     * Fencing gate for the whole-turn commit. Locks the task row {@code FOR UPDATE} and returns 1
+     * only if we still own it (token matches and still PROCESSING). The committer calls this first
+     * inside the commit transaction; if it returns 0 the lease was reclaimed and the commit aborts
+     * without writing any events — the new owner is authoritative.
+     */
+    @Query(value = """
+            SELECT count(*) FROM wflow.tasks
+            WHERE id = :id AND lock_token = :token AND status = 'PROCESSING'
+            FOR UPDATE
+            """, nativeQuery = true)
+    int lockIfOwned(@Param("id") Long id, @Param("token") String token);
 
     List<Task> findByWorkflowIdOrderByCreatedAtDesc(Long workflowId);
 

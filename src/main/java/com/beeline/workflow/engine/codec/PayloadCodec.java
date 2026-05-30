@@ -3,6 +3,7 @@ package com.beeline.workflow.engine.codec;
 import tools.jackson.databind.JavaType;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.lang.reflect.Type;
 
@@ -23,12 +24,13 @@ public final class PayloadCodec {
 
     public String encodeActivityResult(Object result, int attempt) {
         try {
-            String resultJson = result == null ? "null" : objectMapper.writeValueAsString(result);
-            String runtimeType = result != null ? result.getClass().getName() : null;
-            return "{\"attempt\":" + attempt
-                    + ",\"result\":" + resultJson
-                    + (runtimeType != null ? ",\"resultType\":\"" + runtimeType + "\"" : "")
-                    + "}";
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("attempt", attempt);
+            node.set("result", objectMapper.valueToTree(result));
+            if (result != null) {
+                node.put("resultType", result.getClass().getName());
+            }
+            return objectMapper.writeValueAsString(node);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize activity result", e);
         }
@@ -64,27 +66,46 @@ public final class PayloadCodec {
     }
 
     public String encodeActivityStartedMarker(int attempt) {
-        return "{\"attempt\":" + attempt + "}";
+        try {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("attempt", attempt);
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize activity started marker", e);
+        }
     }
 
     public String encodeActivityFailed(int attempt, String reason) {
-        return "{\"attempt\":" + attempt
-                + ",\"reason\":\"" + escapeJson(reason)
-                + "\",\"terminal\":true}";
+        try {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("attempt", attempt);
+            node.put("reason", reason);
+            node.put("terminal", true);
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize activity failure", e);
+        }
     }
 
     public String encodeActivityRetryScheduled(int attempt, java.time.Instant fireAt, String reason) {
-        return "{\"attempt\":" + attempt
-                + ",\"fireAt\":\"" + fireAt
-                + "\",\"reason\":\"" + escapeJson(reason) + "\"}";
+        try {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("attempt", attempt);
+            node.put("fireAt", fireAt.toString());
+            node.put("reason", reason);
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize activity retry marker", e);
+        }
     }
 
     // ── SideEffect ──────────────────────────────────────────────────────────
 
     public String encodeSideEffectResult(Object result) {
         try {
-            String resultJson = result == null ? "null" : objectMapper.writeValueAsString(result);
-            return "{\"result\":" + resultJson + "}";
+            ObjectNode node = objectMapper.createObjectNode();
+            node.set("result", objectMapper.valueToTree(result));
+            return objectMapper.writeValueAsString(node);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize sideEffect result", e);
         }
@@ -158,8 +179,14 @@ public final class PayloadCodec {
         }
     }
 
-    private static String escapeJson(String v) {
-        if (v == null) return "";
-        return v.replace("\\", "\\\\").replace("\"", "\\\"");
+    /** Encode a free-text reason as {@code {"reason": "..."}} with proper JSON escaping. */
+    public String encodeReason(String reason) {
+        try {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("reason", reason);
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize reason payload", e);
+        }
     }
 }

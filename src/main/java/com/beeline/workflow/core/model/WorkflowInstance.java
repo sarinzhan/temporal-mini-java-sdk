@@ -9,6 +9,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.Getter;
 import lombok.Setter;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -52,6 +53,15 @@ public class WorkflowInstance {
 
     @Column(name = "completed_at")
     private Instant completedAt;
+
+    /**
+     * Optimistic-lock fence. A stale worker that resumes after its lease was reclaimed will fail
+     * its terminal write with an OptimisticLockException instead of silently overwriting the
+     * reclaiming node's state. Complements the lock_token SQL fence.
+     */
+    @Version
+    @Column(name = "version", nullable = false)
+    private long version;
 
     @PreUpdate
     void touch() {

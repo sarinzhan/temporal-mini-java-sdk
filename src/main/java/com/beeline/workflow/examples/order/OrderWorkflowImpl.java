@@ -30,10 +30,11 @@ public class OrderWorkflowImpl implements OrderWorkflow {
                 .build();
 
         // Value activity (Supplier): closure captures the injected bean + request.
-        String reservationId = Workflow.activity("reserve", opts,
+        // Pass the explicit return type so replay decodes deterministically.
+        String reservationId = Workflow.activity("reserve", opts, String.class,
                 () -> activities.reserve(req.getOrderId(), req.getAmount()));
 
-        String txnId = Workflow.activity("charge", opts,
+        String txnId = Workflow.activity("charge", opts, String.class,
                 () -> activities.charge(reservationId, req.getAmount()));
 
         // Void activity (Runnable), default options.
