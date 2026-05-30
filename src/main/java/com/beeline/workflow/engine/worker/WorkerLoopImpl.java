@@ -2,7 +2,8 @@ package com.beeline.workflow.engine.worker;
 
 import com.beeline.workflow.core.model.Task;
 import com.beeline.workflow.core.model.TaskStatus;
-import com.beeline.workflow.engine.executor.WorkflowExecutor;
+import com.beeline.workflow.engine.turn.Outcome;
+import com.beeline.workflow.engine.turn.WorkflowTurnRunner;
 import com.beeline.workflow.engine.replay.TaskLease;
 import com.beeline.workflow.persistence.repository.TaskRepository;
 import com.beeline.workflow.spring.autoconfigure.WorkflowProperties;
@@ -33,7 +34,7 @@ public class WorkerLoopImpl implements WorkerLoop {
     private static final Logger log = LoggerFactory.getLogger(WorkerLoopImpl.class);
 
     private final TaskRepository taskRepository;
-    private final WorkflowExecutor workflowExecutor;
+    private final WorkflowTurnRunner turnRunner;
     private final WorkflowProperties properties;
     private final ExecutorService workerPool;
     private final Semaphore slots;
@@ -43,11 +44,11 @@ public class WorkerLoopImpl implements WorkerLoop {
     private final ConcurrentHashMap<Long, TaskLease> running = new ConcurrentHashMap<>();
 
     public WorkerLoopImpl(TaskRepository taskRepository,
-                          WorkflowExecutor workflowExecutor,
+                          WorkflowTurnRunner turnRunner,
                           WorkflowProperties properties,
                           PlatformTransactionManager transactionManager) {
         this.taskRepository = taskRepository;
-        this.workflowExecutor = workflowExecutor;
+        this.turnRunner = turnRunner;
         this.properties = properties;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         int pool = Math.max(1, properties.getWorkerPoolSize());
@@ -151,18 +152,18 @@ private List<Task> claimBatch(int batchSize) {
     }
 
     private void processTask(Task task, TaskLease lease) {
-        WorkflowExecutor.Outcome outcome;
+        Outcome outcome;
         try {
             // Every task drives a workflow decision turn; the entry method (and any inline activities)
             // run on this worker thread to completion or until a retry parks the turn.
-            outcome = workflowExecutor.execute(task, lease);
+            outcome = turnRunner.run(task, lease);
         } catch (Exception ex) {
             if (lease.isLost()) {
                 // Interrupted/aborted because we lost the lock — not a real failure.
-                outcome = WorkflowExecutor.Outcome.LOST;
+                outcome = Outcome.LOST;
             } else {
                 log.error("Unexpected error executing workflow task {}", task.getId(), ex);
-                outcome = WorkflowExecutor.Outcome.FAILED;
+                outcome = Outcome.FAILED;
             }
         } finally {
             // Stop renewing and detaching the thread BEFORE we finalize, so a late renewal can
@@ -173,8 +174,8 @@ private List<Task> claimBatch(int batchSize) {
         finalizeTask(lease, outcome);
     }
 
-    private void finalizeTask(TaskLease lease, WorkflowExecutor.Outcome outcome) {
-        if (outcome == WorkflowExecutor.Outcome.LOST) {
+    private void finalizeTask(TaskLease lease, Outcome outcome) {
+        if (outcome == Outcome.LOST) {
             log.warn("Task {} finalize skipped — lease lost, the reclaiming node owns it now", lease.taskId());
             return;
         }

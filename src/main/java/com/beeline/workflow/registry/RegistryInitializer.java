@@ -6,7 +6,6 @@ import com.beeline.workflow.core.annotation.WorkflowMethod;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.context.ApplicationContext;
 import org.springframework.util.ClassUtils;
 
@@ -35,16 +34,20 @@ public class RegistryInitializer {
 
     @PostConstruct
     public void init() {
-        for (Object bean : applicationContext.getBeansOfType(Object.class).values()) {
-            Class<?> beanClass = AopProxyUtils.ultimateTargetClass(bean);
-            if (!beanClass.isAnnotationPresent(WorkflowComponent.class)) continue;
+        // Look up @WorkflowComponent bean definitions by name instead of materializing every bean
+        // in the context — these are prototype-scoped, and instantiating them eagerly here would
+        // defeat the point. A fresh instance is created per turn in WorkflowExecutor instead.
+        String[] beanNames = applicationContext.getBeanNamesForAnnotation(WorkflowComponent.class);
+        for (String beanName : beanNames) {
+            Class<?> beanClass = applicationContext.getType(beanName);
+            if (beanClass == null) continue;
 
             Set<Class<?>> interfaces = ClassUtils.getAllInterfacesForClassAsSet(beanClass);
             Class<?> workflowIface = findWorkflowInterface(beanClass, interfaces);
             WorkflowComponent componentAnn = beanClass.getAnnotation(WorkflowComponent.class);
             String type = resolveWorkflowType(componentAnn, workflowIface);
 
-            workflowRegistry.register(type, bean);
+            workflowRegistry.register(type, beanClass);
             workflowRegistry.registerInterface(type, workflowIface);
             registerEntry(type, workflowIface);
             log.info("Registered workflow: {} -> impl={} iface={}", type, beanClass.getName(), workflowIface.getName());

@@ -12,7 +12,8 @@ import com.beeline.workflow.persistence.repository.WorkflowRepository;
 import com.beeline.workflow.registry.WorkflowRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.ObjectMapper;
 
 import java.lang.reflect.Method;
@@ -28,17 +29,20 @@ public class WorkflowClientImpl implements WorkflowClient {
     private final EventRepository eventRepository;
     private final WorkflowRegistry workflowRegistry;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
 
     public WorkflowClientImpl(WorkflowRepository workflowRepository,
                               TaskRepository taskRepository,
                               EventRepository eventRepository,
                               WorkflowRegistry workflowRegistry,
-                              ObjectMapper objectMapper) {
+                              ObjectMapper objectMapper,
+                              PlatformTransactionManager transactionManager) {
         this.workflowRepository = workflowRepository;
         this.taskRepository = taskRepository;
         this.eventRepository = eventRepository;
         this.workflowRegistry = workflowRegistry;
         this.objectMapper = objectMapper;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Override
@@ -71,37 +75,38 @@ public class WorkflowClientImpl implements WorkflowClient {
         return type;
     }
 
-    @Transactional
     protected WorkflowInstance writeStartState(String workflowType, String inputJson) {
-        WorkflowInstance wf = new WorkflowInstance();
-        wf.setWorkflowType(workflowType);
-        wf.setStatus(WorkflowStatus.PENDING);
-        wf.setInput(inputJson);
-        wf.setCreatedAt(Instant.now());
-        wf.setUpdatedAt(Instant.now());
-        workflowRepository.save(wf);
+        return transactionTemplate.execute(status -> {
+            WorkflowInstance wf = new WorkflowInstance();
+            wf.setWorkflowType(workflowType);
+            wf.setStatus(WorkflowStatus.PENDING);
+            wf.setInput(inputJson);
+            wf.setCreatedAt(Instant.now());
+            wf.setUpdatedAt(Instant.now());
+            workflowRepository.save(wf);
 
-        Event created = new Event();
-        created.setWorkflowId(wf.getId());
-        created.setEventType(EventType.WORKFLOW_CREATED);
-        created.setPayload(wf.getInput());
-        eventRepository.save(created);
+            Event created = new Event();
+            created.setWorkflowId(wf.getId());
+            created.setEventType(EventType.WORKFLOW_CREATED);
+            created.setPayload(wf.getInput());
+            eventRepository.save(created);
 
-        Task t = new Task();
-        t.setWorkflowId(wf.getId());
-        t.setTaskType("workflow.start");
-        t.setStatus(TaskStatus.PENDING);
-        t.setScheduledAt(Instant.now());
-        taskRepository.save(t);
+            Task t = new Task();
+            t.setWorkflowId(wf.getId());
+            t.setTaskType("workflow.start");
+            t.setStatus(TaskStatus.PENDING);
+            t.setScheduledAt(Instant.now());
+            taskRepository.save(t);
 
-        Event queued = new Event();
-        queued.setWorkflowId(wf.getId());
-        queued.setEventType(EventType.WORKFLOW_TASK_QUEUED);
-        queued.setPayload("{\"reason\":\"start\"}");
-        eventRepository.save(queued);
+            Event queued = new Event();
+            queued.setWorkflowId(wf.getId());
+            queued.setEventType(EventType.WORKFLOW_TASK_QUEUED);
+            queued.setPayload("{\"reason\":\"start\"}");
+            eventRepository.save(queued);
 
-        log.info("Workflow {} ({}) started, task {} enqueued", wf.getId(), workflowType, t.getId());
-        return wf;
+            log.info("Workflow {} ({}) started, task {} enqueued", wf.getId(), workflowType, t.getId());
+            return wf;
+        });
     }
 
     private String serialize(Object value) {

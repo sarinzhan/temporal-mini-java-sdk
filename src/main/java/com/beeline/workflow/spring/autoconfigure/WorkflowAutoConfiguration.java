@@ -1,14 +1,22 @@
 package com.beeline.workflow.spring.autoconfigure;
 
-import com.beeline.workflow.core.api.Workflow;
 import com.beeline.workflow.engine.cluster.InstanceRegistryService;
-import com.beeline.workflow.engine.executor.ActivityExecutor;
-import com.beeline.workflow.engine.executor.ActivityExecutorImpl;
-import com.beeline.workflow.engine.executor.WorkflowExecutor;
+import com.beeline.workflow.engine.codec.PayloadCodec;
+import com.beeline.workflow.engine.command.CommandDispatcher;
+import com.beeline.workflow.engine.command.CommandHandler;
+import com.beeline.workflow.engine.command.WorkflowCommand;
+import com.beeline.workflow.engine.command.handler.ActivityCommandHandler;
+import com.beeline.workflow.engine.command.handler.SideEffectCommandHandler;
+import com.beeline.workflow.engine.command.handler.VersionCommandHandler;
+import com.beeline.workflow.engine.lifecycle.WorkflowLifecycleWriter;
+import com.beeline.workflow.engine.lifecycle.WorkflowOutcomeMapper;
+import com.beeline.workflow.engine.replay.EventLogFactory;
+import com.beeline.workflow.engine.retry.RetryDecider;
 import com.beeline.workflow.engine.scheduler.TimeoutWatcher;
 import com.beeline.workflow.engine.scheduler.TimeoutWatcherImpl;
 import com.beeline.workflow.engine.scheduler.WakeupScheduler;
 import com.beeline.workflow.engine.scheduler.WakeupSchedulerImpl;
+import com.beeline.workflow.engine.turn.WorkflowTurnRunner;
 import com.beeline.workflow.engine.worker.WorkerLoop;
 import com.beeline.workflow.engine.worker.WorkerLoopImpl;
 import com.beeline.workflow.persistence.repository.EventRepository;
@@ -33,6 +41,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import tools.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
+import java.util.List;
 
 @AutoConfiguration
 @EnableScheduling
@@ -55,31 +64,82 @@ public class WorkflowAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public WorkflowRegistry workflowRegistry() {
-        return new WorkflowRegistry();
+    public WorkflowRegistry workflowRegistry(ApplicationContext applicationContext) {
+        return new WorkflowRegistry(applicationContext);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public ActivityExecutor activityExecutor(EventRepository eventRepository,
-                                             ScheduleRepository scheduleRepository,
-                                             ObjectMapper objectMapper,
-                                             PlatformTransactionManager transactionManager) {
-        // Install the mapper used by Workflow.sideEffect / getVersion.
-        Workflow.installObjectMapper(objectMapper);
-        return new ActivityExecutorImpl(eventRepository, scheduleRepository, objectMapper, transactionManager);
+    public PayloadCodec payloadCodec(ObjectMapper objectMapper) {
+        return new PayloadCodec(objectMapper);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public WorkflowExecutor workflowExecutor(WorkflowRegistry workflowRegistry,
-                                             ActivityExecutor activityExecutor,
-                                             WorkflowRepository workflowRepository,
-                                             EventRepository eventRepository,
-                                             ObjectMapper objectMapper,
-                                             PlatformTransactionManager transactionManager) {
-        return new WorkflowExecutor(workflowRegistry, activityExecutor, workflowRepository,
-                eventRepository, objectMapper, transactionManager);
+    public RetryDecider retryDecider() {
+        return new RetryDecider();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public EventLogFactory eventLogFactory(EventRepository eventRepository,
+                                           ScheduleRepository scheduleRepository,
+                                           PlatformTransactionManager transactionManager,
+                                           PayloadCodec codec) {
+        return new EventLogFactory(eventRepository, scheduleRepository, transactionManager, codec);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowLifecycleWriter workflowLifecycleWriter(WorkflowRepository workflowRepository,
+                                                           PlatformTransactionManager transactionManager,
+                                                           PayloadCodec codec) {
+        return new WorkflowLifecycleWriter(workflowRepository, transactionManager, codec);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowOutcomeMapper workflowOutcomeMapper(WorkflowLifecycleWriter lifecycle, PayloadCodec codec) {
+        return new WorkflowOutcomeMapper(lifecycle, codec);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ActivityCommandHandler activityCommandHandler(RetryDecider retryDecider) {
+        return new ActivityCommandHandler(retryDecider);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public SideEffectCommandHandler sideEffectCommandHandler() {
+        return new SideEffectCommandHandler();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public VersionCommandHandler versionCommandHandler() {
+        return new VersionCommandHandler();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public CommandDispatcher commandDispatcher(List<CommandHandler<? extends WorkflowCommand>> handlers) {
+        return new CommandDispatcher(handlers);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowTurnRunner workflowTurnRunner(WorkflowRegistry workflowRegistry,
+                                                 WorkflowRepository workflowRepository,
+                                                 EventRepository eventRepository,
+                                                 ObjectMapper objectMapper,
+                                                 PayloadCodec codec,
+                                                 EventLogFactory eventLogFactory,
+                                                 WorkflowLifecycleWriter lifecycle,
+                                                 WorkflowOutcomeMapper outcomeMapper,
+                                                 CommandDispatcher dispatcher) {
+        return new WorkflowTurnRunner(workflowRegistry, workflowRepository, eventRepository,
+                objectMapper, codec, eventLogFactory, lifecycle, outcomeMapper, dispatcher);
     }
 
     @Bean
@@ -92,10 +152,10 @@ public class WorkflowAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public WorkerLoop workerLoop(TaskRepository taskRepository,
-                                 WorkflowExecutor workflowExecutor,
+                                 WorkflowTurnRunner turnRunner,
                                  WorkflowProperties properties,
                                  PlatformTransactionManager transactionManager) {
-        return new WorkerLoopImpl(taskRepository, workflowExecutor, properties, transactionManager);
+        return new WorkerLoopImpl(taskRepository, turnRunner, properties, transactionManager);
     }
 
     @Bean
@@ -118,9 +178,10 @@ public class WorkflowAutoConfiguration {
                                          TaskRepository taskRepository,
                                          EventRepository eventRepository,
                                          WorkflowRegistry workflowRegistry,
-                                         ObjectMapper objectMapper) {
+                                         ObjectMapper objectMapper,
+                                         PlatformTransactionManager transactionManager) {
         return new WorkflowClientImpl(workflowRepository, taskRepository, eventRepository,
-                workflowRegistry, objectMapper);
+                workflowRegistry, objectMapper, transactionManager);
     }
 
     @Bean

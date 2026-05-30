@@ -1,20 +1,26 @@
 package com.beeline.workflow.registry;
 
+import org.springframework.context.ApplicationContext;
+
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class WorkflowRegistry {
 
-    private final Map<String, Object> beansByType = new ConcurrentHashMap<>();
+    private final ApplicationContext applicationContext;
+
     private final Map<String, Class<?>> classesByType = new ConcurrentHashMap<>();
     private final Map<Class<?>, String> typeByInterface = new ConcurrentHashMap<>();
     private final Map<String, Class<?>> interfaceByType = new ConcurrentHashMap<>();
     private final Map<String, Method> entryMethodByType = new ConcurrentHashMap<>();
 
-    public void register(String workflowType, Object bean) {
-        beansByType.put(workflowType, bean);
-        classesByType.put(workflowType, bean.getClass());
+    public WorkflowRegistry(ApplicationContext applicationContext) {
+        this.applicationContext = applicationContext;
+    }
+
+    public void register(String workflowType, Class<?> beanClass) {
+        classesByType.put(workflowType, beanClass);
     }
 
     public void registerInterface(String workflowType, Class<?> iface) {
@@ -38,8 +44,16 @@ public class WorkflowRegistry {
         return entryMethodByType.get(workflowType);
     }
 
-    public Object getBean(String workflowType) {
-        return beansByType.get(workflowType);
+    /**
+     * Returns a fresh prototype instance of the workflow bean. Each decision turn must call this
+     * to get its own object, so concurrent turns of the same workflow type don't share mutable
+     * fields. State across turns is reconstructed from the event history via replay, not from
+     * the bean instance itself.
+     */
+    public Object createInstance(String workflowType) {
+        Class<?> beanClass = classesByType.get(workflowType);
+        if (beanClass == null) return null;
+        return applicationContext.getBean(beanClass);
     }
 
     public Class<?> getBeanClass(String workflowType) {
@@ -47,10 +61,10 @@ public class WorkflowRegistry {
     }
 
     public boolean contains(String workflowType) {
-        return beansByType.containsKey(workflowType);
+        return classesByType.containsKey(workflowType);
     }
 
     public int size() {
-        return beansByType.size();
+        return classesByType.size();
     }
 }

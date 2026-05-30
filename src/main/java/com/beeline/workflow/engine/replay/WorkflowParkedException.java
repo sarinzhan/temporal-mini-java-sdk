@@ -2,8 +2,7 @@ package com.beeline.workflow.engine.replay;
 
 /**
  * Thrown to signal "this turn is over, please commit and stop". Not an error — the
- * {@link com.beeline.workflow.engine.executor.WorkflowExecutor} catches it as a normal end
- * of a decision turn.
+ * turn runner catches it as a normal end of a decision turn.
  *
  * <p>The only suspending command now is an activity retry: when a failed-but-retryable activity
  * schedules its next attempt, it writes {@code ACTIVITY_RETRY_SCHEDULED} + a {@code wflow.schedule}
