@@ -1,0 +1,111 @@
+ 🔴 Критические баги (корректность)
+
+  1. returnType у активности всегда null → кэш реплея десериализуется неверно
+
+  Workflow.activity(...) создаёт ActivityCommand с третьим аргументом null:
+  // Workflow.java:49,65,74,82
+  dispatch(new ActivityCommand(name, options, null, () -> fn.get()));
+  returnType записывается жёстко как null. На фазе реплея ActivityCommandHandler.handle вызывает:
+  // ActivityCommandHandler.java:79
+  return ctx.codec().decodeActivityResult(completed.payload(), cmd.returnType()); // returnType == null
+  И PayloadCodec.decodeActivityResult при returnType == null падает обратно на resultType, записанный в payload по result.getClass().getName() (PayloadCodec.java:44-55). Это:
+  - ломается для дженериков (List<Order> → ArrayList без параметра типа → элементы как LinkedHashMap);
+  - ломается если рантайм-класс не в classpath (ClassNotFoundException → workflow умирает на реплее);
+  - не работает для интерфейсных/абстрактных возвращаемых типов.
+
+  В первый прогон (без реплея) активность возвращает объект напрямую — компилируется и работает. Баг проявляется только при реплее (повторный прогон после рестарта/wakeup), что делает его особенно коварным. Тип нужно захватывать в момент вызова (через TypeReference/явный Class<R> в API Workflow.activity).
+
+  2. Non-determinism: проверка типа активности до nextSeq() рассинхронизирована с записью результата
+
+  В ActivityCommandHandler после findActivityResult для случая Failed бросается ActivityFailureException (строка 82), но findActivityResult смотрит latestEventForSeq. При этом assertCommandTypeMatches (строка 72) использует findCompletion, который игнорирует события без commandType. Это рабочее, но хрупкое
+  место: если в истории для seq есть только ACTIVITY_RETRY_SCHEDULED (без терминального), findActivityResult вернёт empty → активность запустится заново, и countUsedActivityAttempts пересчитает attempt. Это корректно ровно при условии, что wakeup-таск приходит строго после записи ACTIVITY_RETRY_SCHEDULED —
+  но запись события и создание schedule-строки в EventLogImpl.activityRetryScheduled (строки 64-75) в одной транзакции, а wakeup читает в другой. Race-окна нет, но любой будущий рефактор это легко сломает. Нужны тесты.
+
+  ---
+  🔴 Durability / транзакционная целостность
+
+  3. События пишутся в отдельных транзакциях, не атомарно с финализацией задачи
+
+  EventLogImpl открывает новую транзакцию на каждое событие (transactionTemplate.executeWithoutResult на каждый appendCommand/appendLifecycle). А finalizeTask в WorkerLoopImpl — ещё одна отдельная транзакция. Сценарий: воркер пишет ACTIVITY_COMPLETED (commit), затем WORKFLOW_COMPLETED (commit), затем падает
+  JVM до finalizeIfOwned. Задача остаётся PROCESSING, по истечении lease resetStaleLocks вернёт её в PENDING, и turn выполнится снова. Реплей сделает workflow идемпотентным по активностям, но markCompleted/workflowCompleted запишутся повторно (дубликат WORKFLOW_COMPLETED в истории). Нет защиты от двойного
+  терминального события. Для настоящего Temporal-подобного движка вся запись одного turn должна коммититься одной транзакцией.
+
+  4. markRunning коммитит до выполнения тела turn — частичное состояние при краше
+
+  WorkflowTurnRunner.run (строки 102-103) пишет markRunning + workflowTaskStarted в своих транзакциях ещё до entryMethod.invoke. Это нормально для статуса, но в сочетании с (3) даёт несогласованные истории при сбоях.
+
+  ---
+  🟠 Concurrency / fencing
+
+  5. Fencing-токен проверяется в Java (assertOwned), но запись события НЕ фенсится в SQL
+
+  EventLogImpl.appendCommand делает lease.assertOwned() (in-memory флаг) и потом eventRepository.save(e) обычным INSERT — без условия WHERE lock_token = :token. Между assertOwned() и save() есть окно: renewLeases мог только что выставить lost=true, но эта проверка прошла раньше. Реальная защита (SQL-level
+  fencing) есть только у finalizeIfOwned/renewLease. Активная запись в events от «потерянного» воркера всё ещё возможна → дубли/порча истории при clock skew или паузе GC дольше lease (60с). Это фундаментальный разрыв в гарантиях fencing.
+
+  6. Таймаут активности не отменяет настоящую работу
+
+  invokeWithTimeout (ActivityCommandHandler.java:135) делает future.cancel(true) — но CompletableFuture.cancel не прерывает уже бегущий supplyAsync-таск (известная семантика CompletableFuture). Активность продолжит выполняться в wf-activity-* потоке (cachedThreadPool — неограниченный!), workflow при этом
+  пойдёт по пути таймаута/ретрая. Возможна утечка потоков и двойное выполнение сайд-эффектов активности.
+
+  7. Неограниченный newCachedThreadPool для активностей
+
+  ActivityCommandHandler создаёт Executors.newCachedThreadPool без верхней границы и без backpressure. Под нагрузкой (много медленных активностей) — OOM по потокам. Имя потока "wf-activity-" + System.nanoTime() тоже создаёт по потоку на вызов.
+
+  ---
+  🟠 Архитектурные / эксплуатационные
+
+  8. Нет уникального индекса на (workflow_id, seq, event_type) или на терминальные события
+
+  Схема (schema.sql) не имеет ни одного уникального ограничения, защищающего от дублей событий (см. баги 3, 5). Реплей предполагает уникальность seq, но БД её не гарантирует.
+
+  9. Schedule: processed=true коммитится до создания wakeup-таска в одной транзакции — но при падении воркап теряется
+
+  WakeupSchedulerImpl.pollAndFire помечает processed=true и создаёт таск в одной @Transactional — это ок. Но если задача упадёт после коммита и до того, как воркер её подхватит, повторной попытки нет (строка уже processed). Меньшая проблема, но при потере таска parked workflow зависнет навсегда. Нет
+  «reconciliation» для parked-workflow без живого таска.
+
+  10. Нет нерабочих фич, помеченных в коде
+
+  EventType.java содержит TODO прямо в enum: WORKFLOW_TASK_QUEUED // убрать, WORKFLOW_TASK_COMPLETED // добавить WORKFLOW_TASK_FAILED, ACTIVITY_FAILED // ACTIVITY_TIMEOUT, ACTIVITY_RETRY_SCHEDULED // ACTIVITY_SCHEDULED. То есть модель событий не финализирована. Нет отдельного WORKFLOW_TASK_FAILED, нет
+  ACTIVITY_TIMEOUT (таймаут логируется как обычный fail).
+
+  11. Отсутствуют сигналы/запросы/таймеры/child workflows/cancellation
+
+  WorkflowStatus.CANCELLED обрабатывается в WorkflowHandleImpl, но нигде не выставляется — отмены workflow нет. Нет Workflow.sleep/таймеров (только retry-backoff), нет сигналов и query — для «production workflow engine» это базовая функциональность. REST-контроллер умеет только start/status/events.
+
+  12. Полное отсутствие тестов
+
+  src/test/**/*.java — пусто. Для движка с replay-семантикой, fencing и многопоточностью это блокер само по себе. Нет ни одного теста на детерминизм реплея, на потерю lease, на ретраи.
+
+  ---
+  🟡 Прочее
+
+  - schemaExists() проверяет только таблицу workflows (WorkflowSchemaInitializer.java:42). Если она есть, а остальные нет (частичная миграция) — приложение стартует с битой схемой. Нет версионирования миграций (Flyway/Liquibase).
+  - ddl-auto=none + ручной schema.sql — нет управления миграциями вообще.
+  - escapeJson в PayloadCodec (строка 161) — ручная JSON-сборка строк (encodeActivityResult и др.) экранирует только \ и ", но не управляющие символы (\n, \t, \u0000) в reason. Сообщение исключения с newline → невалидный JSONB → INSERT упадёт. Нужно сериализовать через objectMapper, а не строкой.
+  - heartbeat() вызывает register() без сохранённого результата при отсутствии записи — лишний двойной save, но безвредно.
+  - getPoolStats врёт: workerPool — это newFixedThreadPool (является ThreadPoolExecutor), но реальная конкуррентность ограничена Semaphore, а не пулом; active/max из пула вводят в заблуждение.
+  - Логи и комментарии частично на русском, частично TODO-черновики — код явно in-progress (коммиты «Что сделано», «Как теперь работает»).
+  - Безопасность: пароль БД дефолтится в postgres/postgres, REST без аутентификации, startByType принимает произвольный raw JSON.
+
+  ---
+  Вердикт
+
+  ┌──────────────────────────────────────────────────┬────────────────┐
+  │                     Область                      │     Статус     │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Базовый happy-path (start → activity → complete) │ ✅ работает    │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Реплей с не-примитивным возвращаемым типом       │ ❌ баг #1      │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Гарантии durability при краше                    │ ❌ баги #3, #4 │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Fencing записи событий                           │ ❌ баг #5      │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Таймаут/отмена активностей                       │ ❌ баги #6, #7 │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Сигналы/таймеры/отмена/child WF                  │ ❌ отсутствуют │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Тесты                                            │ ❌ ноль        │
+  ├──────────────────────────────────────────────────┼────────────────┤
+  │ Миграции схемы                                   │ ❌ нет         │
+  └──────────────────────────────────────────────────┴────────────────┘
