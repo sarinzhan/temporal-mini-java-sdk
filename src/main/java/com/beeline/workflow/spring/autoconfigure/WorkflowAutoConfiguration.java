@@ -121,8 +121,12 @@ public class WorkflowAutoConfiguration {
     @ConditionalOnMissingBean
     public ActivityCommandHandler activityCommandHandler(RetryDecider retryDecider,
                                                          WorkflowProperties properties) {
+        // Activities are invoked synchronously inline within a decision turn — a turn blocks on each
+        // activity before issuing the next — so the number of activities in flight never exceeds the
+        // number of concurrent turns (worker-pool-size). Size the activity pool to match; no separate
+        // knob is needed.
         return new ActivityCommandHandler(retryDecider, (name, opts) -> opts,
-                properties.getActivityMaxThreads());
+                properties.getWorkerPoolSize());
     }
 
     @Bean

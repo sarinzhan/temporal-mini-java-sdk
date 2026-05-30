@@ -223,8 +223,7 @@ RetryPolicy.newBuilder()
 
 | Свойство | По умолчанию | Назначение |
 |---|---|---|
-| `workflow.worker-pool-size` | 4 | число потоков воркера |
-| `workflow.activity-max-threads` | 64 | размер пула, в котором выполняются тела активностей |
+| `workflow.worker-pool-size` | 4 | число потоков воркера; им же ограничен пул исполнения тел активностей |
 | `workflow.poll-interval-ms` | 1000 | период опроса задач |
 | `workflow.lock-timeout-seconds` | 60 | срок аренды задачи |
 | `workflow.lease-renew-interval-ms` | 20000 | период продления аренды |
@@ -273,7 +272,7 @@ RetryPolicy.newBuilder()
 | `WorkerLoopImpl` | Поллер задач; claim под арендой, продление аренды, запуск decision-turn в пуле потоков |
 | `WorkflowExecutor` | Один decision-turn: грузит историю, прогоняет метод workflow inline, пишет лайфсайкл-события |
 | `HistoryCursor` | Раздаёт `seq`, отвечает «эта команда уже завершена в истории?», ловит недетерминизм |
-| `ActivityExecutorImpl` | Inline-исполнение активити: replay-кеш по seq, ретрай через парковку + строку в `schedule`. Тело активности выполняется в ограниченном пуле (`activity-max-threads`) с backpressure через `CallerRunsPolicy`; по `startToCloseTimeout` поток активности прерывается |
+| `ActivityCommandHandler` | Inline-исполнение активити: replay-кеш по seq, ретрай через парковку + строку в `schedule`. Тело активности выполняется в ограниченном пуле (размер = `worker-pool-size`); при насыщении пула submit отклоняется (`AbortPolicy`) и турн паркуется с короткой backpressure-перепланировкой, не сжигая попытку; по `startToCloseTimeout` поток активности прерывается |
 | `WakeupSchedulerImpl` | Поллер `schedule`: в срок ставит задачу `workflow`, чтобы припаркованный workflow проснулся |
 | `TimeoutWatcherImpl` | Сбрасывает протухшие аренды → задачу подхватывает другая реплика |
 | `WorkflowClientImpl` | Старт workflow (запись начального состояния + задачи) |
@@ -285,7 +284,7 @@ start → tasks(workflow) ──claim+lease──> WorkflowExecutor.execute
    │                                          │ replay events по seq
    │                                          │ метод workflow (inline)
    │                                          ▼
-   │                            Workflow.activity(...) ── ActivityExecutorImpl
+   │                            Workflow.activity(...) ── ActivityCommandHandler
    │                                          │   seq есть COMPLETED? → кеш
    │                                          │   иначе запустить лямбду
    │                                ┌─────────┴─────────┐

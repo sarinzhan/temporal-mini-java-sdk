@@ -7,7 +7,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class WorkflowProperties implements InitializingBean {
 
     private int workerPoolSize = 4;
-    private int activityMaxThreads = 64;
     private long pollIntervalMs = 1000;
     private long lockTimeoutSeconds = 60;
     private long leaseRenewIntervalMs = 20000;
@@ -18,9 +17,6 @@ public class WorkflowProperties implements InitializingBean {
 
     public int getWorkerPoolSize() { return workerPoolSize; }
     public void setWorkerPoolSize(int v) { this.workerPoolSize = v; }
-
-    public int getActivityMaxThreads() { return activityMaxThreads; }
-    public void setActivityMaxThreads(int v) { this.activityMaxThreads = v; }
 
     public long getPollIntervalMs() { return pollIntervalMs; }
     public void setPollIntervalMs(long v) { this.pollIntervalMs = v; }
