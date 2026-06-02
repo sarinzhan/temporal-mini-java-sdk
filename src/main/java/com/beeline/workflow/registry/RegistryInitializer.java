@@ -1,6 +1,6 @@
 package com.beeline.workflow.registry;
 
-import com.beeline.workflow.core.annotation.WorkflowComponent;
+import com.beeline.workflow.core.annotation.WorkflowImpl;
 import com.beeline.workflow.core.annotation.WorkflowInterface;
 import com.beeline.workflow.core.annotation.WorkflowMethod;
 import jakarta.annotation.PostConstruct;
@@ -12,6 +12,7 @@ import org.springframework.util.ClassUtils;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -37,14 +38,14 @@ public class RegistryInitializer {
         // Look up @WorkflowComponent bean definitions by name instead of materializing every bean
         // in the context — these are prototype-scoped, and instantiating them eagerly here would
         // defeat the point. A fresh instance is created per turn in WorkflowExecutor instead.
-        String[] beanNames = applicationContext.getBeanNamesForAnnotation(WorkflowComponent.class);
-        for (String beanName : beanNames) {
+        Map<String, Object> beans = applicationContext.getBeansWithAnnotation(WorkflowInterface.class);
+        for (String beanName : beans) {
             Class<?> beanClass = applicationContext.getType(beanName);
             if (beanClass == null) continue;
 
             Set<Class<?>> interfaces = ClassUtils.getAllInterfacesForClassAsSet(beanClass);
             Class<?> workflowIface = findWorkflowInterface(beanClass, interfaces);
-            WorkflowComponent componentAnn = beanClass.getAnnotation(WorkflowComponent.class);
+            WorkflowImpl componentAnn = beanClass.getAnnotation(WorkflowImpl.class);
             String type = resolveWorkflowType(componentAnn, workflowIface);
 
             workflowRegistry.register(type, beanClass);
@@ -77,7 +78,7 @@ public class RegistryInitializer {
         return wfInterfaces.get(0);
     }
 
-    private String resolveWorkflowType(WorkflowComponent componentAnn, Class<?> workflowIface) {
+    private String resolveWorkflowType(WorkflowImpl componentAnn, Class<?> workflowIface) {
         if (componentAnn != null && componentAnn.value() != null && !componentAnn.value().isBlank()) {
             return componentAnn.value();
         }

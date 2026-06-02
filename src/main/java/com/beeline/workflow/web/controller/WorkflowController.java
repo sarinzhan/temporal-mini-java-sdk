@@ -6,12 +6,15 @@ import com.beeline.workflow.core.model.WorkflowStatus;
 import com.beeline.workflow.persistence.repository.EventRepository;
 import com.beeline.workflow.persistence.repository.WorkflowRepository;
 import com.beeline.workflow.spring.api.WorkflowClient;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
@@ -44,12 +47,23 @@ public class WorkflowController {
         return new StartResponse(id, type);
     }
 
+    /**
+     * List recent workflows (newest first), capped by {@code limit}. The UI paginates and filters
+     * client-side over this set; raise the cap or add server-side paging if histories grow large.
+     */
+    @GetMapping
+    public List<WorkflowView> list(@RequestParam(defaultValue = "500") int limit) {
+        int capped = Math.min(Math.max(limit, 1), 2000);
+        return workflowRepository.findAll(
+                        PageRequest.of(0, capped, Sort.by(Sort.Direction.DESC, "createdAt")))
+                .map(WorkflowView::of)
+                .toList();
+    }
+
     @GetMapping("/{id}")
-    public ResponseEntity<StatusResponse> status(@PathVariable Long id) {
+    public ResponseEntity<WorkflowView> get(@PathVariable Long id) {
         return workflowRepository.findById(id)
-                .map(wf -> ResponseEntity.ok(new StatusResponse(
-                        wf.getId(), wf.getWorkflowType(), wf.getStatus(),
-                        wf.getResult(), wf.getError(), wf.getCompletedAt())))
+                .map(wf -> ResponseEntity.ok(WorkflowView.of(wf)))
                 .orElse(ResponseEntity.notFound().build());
     }
 
@@ -62,14 +76,24 @@ public class WorkflowController {
 
     public record StartResponse(Long workflowId, String type) {}
 
-    public record StatusResponse(Long id, String type, WorkflowStatus status,
-                                 String result, String error, Instant completedAt) {}
+    /** Full workflow view used by both the list and the detail screens. */
+    public record WorkflowView(Long id, String workflowType, WorkflowStatus status,
+                               String input, String result, String error, String taskQueue,
+                               Instant createdAt, Instant updatedAt, Instant completedAt) {
+        static WorkflowView of(WorkflowInstance w) {
+            // taskQueue is null: the engine has no per-workflow queue concept (single task queue).
+            return new WorkflowView(w.getId(), w.getWorkflowType(), w.getStatus(),
+                    w.getInput(), w.getResult(), w.getError(), null,
+                    w.getCreatedAt(), w.getUpdatedAt(), w.getCompletedAt());
+        }
+    }
 
-    public record EventView(Long id, String eventType, String commandType, Integer seq,
-                            String activityName, String payload, Instant createdAt) {
+    public record EventView(Long id, Long workflowId, String eventType, String commandType,
+                            Integer seq, String activityName, String payload, Instant createdAt) {
         static EventView of(Event e) {
-            return new EventView(e.getId(), e.getEventType().name(), e.getCommandType(),
-                    e.getSeq(), e.getActivityName(), e.getPayload(), e.getCreatedAt());
+            return new EventView(e.getId(), e.getWorkflowId(), e.getEventType().name(),
+                    e.getCommandType(), e.getSeq(), e.getActivityName(), e.getPayload(),
+                    e.getCreatedAt());
         }
     }
 }

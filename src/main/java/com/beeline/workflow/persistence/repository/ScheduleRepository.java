@@ -22,4 +22,7 @@ public interface ScheduleRepository extends JpaRepository<Schedule, Long> {
     List<Schedule> pollDue(@Param("now") Instant now, @Param("batchSize") int batchSize);
 
     List<Schedule> findByWorkflowIdAndProcessedFalseOrderByFireAtAsc(Long workflowId);
+
+    /** Future wake-ups not yet fired — workflows currently parked in a retry/timer backoff. */
+    long countByProcessedFalse();
 }

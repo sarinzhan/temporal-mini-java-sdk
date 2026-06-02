@@ -1,2 +1,3 @@
 com.beeline.workflow.spring.autoconfigure.WorkflowAutoConfiguration
+com.beeline.workflow.spring.autoconfigure.WorkflowMetricsAutoConfiguration
 com.beeline.workflow.web.WorkflowWebAutoConfiguration

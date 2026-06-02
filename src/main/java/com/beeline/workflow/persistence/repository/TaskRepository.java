@@ -104,4 +104,6 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     List<Task> findByWorkflowIdOrderByCreatedAtDesc(Long workflowId);
 
     List<Task> findByWorkflowIdAndStatus(Long workflowId, TaskStatus status);
+
+    long countByStatus(TaskStatus status);
 }

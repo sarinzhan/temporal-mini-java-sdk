@@ -1,6 +1,6 @@
 package com.beeline.workflow.it.support;
 
-import com.beeline.workflow.core.annotation.WorkflowComponent;
+import com.beeline.workflow.core.annotation.WorkflowImpl;
 import com.beeline.workflow.core.api.Workflow;
 import com.beeline.workflow.core.config.ActivityOptions;
 import com.beeline.workflow.core.config.RetryPolicy;
@@ -12,7 +12,7 @@ import java.time.Duration;
  * Activity bodies delegate to the injected {@link TestActivities} so a test can assert exactly how
  * many times each one really executed.
  */
-@WorkflowComponent
+@WorkflowImpl
 public class ScenarioWorkflowImpl implements ScenarioWorkflow {
 
     private final TestActivities activities;

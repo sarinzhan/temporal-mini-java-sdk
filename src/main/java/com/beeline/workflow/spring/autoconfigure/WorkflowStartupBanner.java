@@ -27,6 +27,8 @@ public class WorkflowStartupBanner implements ApplicationListener<ApplicationRea
                 "                 Temporal Lite - STARTED               \n" +
                 "=======================================================\n" +
                 "  REST API        : {}/workflow/api/workflows\n" +
+                "  UI              : {}/workflow/ui/index.html\n" +
+                "  Metrics (UI)    : {}/workflow/api/metrics\n" +
                 "  Instance ID     : {}\n" +
                 "  Multi-instance  : {}\n" +
                 "-------------------------------------------------------\n" +
@@ -37,6 +39,8 @@ public class WorkflowStartupBanner implements ApplicationListener<ApplicationRea
                 "  retry-poll-interval-ms      = {}\n" +
                 "  timeout-watcher-interval-ms = {}\n" +
                 "=======================================================",
+                base,
+                base,
                 base,
                 inst.getId(),
                 inst.isMultiInstance(),

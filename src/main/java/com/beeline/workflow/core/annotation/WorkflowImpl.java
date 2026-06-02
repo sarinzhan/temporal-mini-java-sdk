@@ -13,6 +13,7 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 @Component
 @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
-public @interface WorkflowComponent {
+public @interface WorkflowImpl {
     String value() default "";
+    String taskQueue() default "";
 }

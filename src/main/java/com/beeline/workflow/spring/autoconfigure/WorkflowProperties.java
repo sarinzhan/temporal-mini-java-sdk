@@ -14,6 +14,7 @@ public class WorkflowProperties implements InitializingBean {
     private long timeoutWatcherIntervalMs = 5000;
 
     private final Instance instance = new Instance();
+    private final Metrics metrics = new Metrics();
 
     public int getWorkerPoolSize() { return workerPoolSize; }
     public void setWorkerPoolSize(int v) { this.workerPoolSize = v; }
@@ -35,6 +36,8 @@ public class WorkflowProperties implements InitializingBean {
 
     public Instance getInstance() { return instance; }
 
+    public Metrics getMetrics() { return metrics; }
+
     /** Convenience: instance id used as tasks.locked_by. */
     public String getInstanceId() { return instance.getId(); }
 
@@ -52,6 +55,23 @@ public class WorkflowProperties implements InitializingBean {
                         "Both are required when running multi-instance.");
             }
         }
+    }
+
+    /** Configuration for the periodic metrics rollup (see MetricsCollector). */
+    public static class Metrics {
+        private boolean enabled = true;
+        private long intervalMs = 15000;
+        /** Snapshots older than this are pruned on each run; 0 disables pruning. */
+        private long retentionHours = 168; // 7 days
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean v) { this.enabled = v; }
+
+        public long getIntervalMs() { return intervalMs; }
+        public void setIntervalMs(long v) { this.intervalMs = v; }
+
+        public long getRetentionHours() { return retentionHours; }
+        public void setRetentionHours(long v) { this.retentionHours = v; }
     }
 
     public static class Instance {

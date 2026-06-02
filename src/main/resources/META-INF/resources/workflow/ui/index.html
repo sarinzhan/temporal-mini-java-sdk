@@ -1,24 +1,2901 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="system">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Workflow</title>
-    <script>
-      (function () {
-        try {
-          var t = localStorage.getItem('wf-theme') || 'system';
-          var resolved = t === 'system'
-            ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-            : t;
-          document.documentElement.setAttribute('data-theme', resolved);
-        } catch (e) {}
-      })();
-    </script>
-    <script type="module" crossorigin src="/workflow/ui/assets/index-4mtGRXfy.js"></script>
-    <link rel="stylesheet" crossorigin href="/workflow/ui/assets/index-BRpt7FVq.css">
-  </head>
-  <body class="bg-bg text-fg">
-    <div id="root"></div>
-  </body>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>temporal·lite — Workflow Console</title>
+  <style>
+/* temporal-lite console — theme tokens + layout */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  --sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* default: Slate (cool dark) */
+  --bg: #0c0e12;
+  --panel: #12151b;
+  --panel-2: #161a22;
+  --panel-3: #1b2029;
+  --border: #232932;
+  --border-soft: #1b2029;
+  --text: #e4e8ef;
+  --text-dim: #9aa4b2;
+  --text-faint: #5d6675;
+  --accent: oklch(0.72 0.13 162);
+  --accent-ink: #04130d;
+  --row-hover: #171c24;
+  --row-sel: #1a2733;
+
+  /* semantic status (constant across themes) */
+  --st-running: oklch(0.72 0.13 232);
+  --st-retrying: oklch(0.80 0.13 78);
+  --st-completed: oklch(0.74 0.13 158);
+  --st-failed: oklch(0.68 0.17 22);
+  --st-timeout: oklch(0.73 0.15 48);
+  --st-pending: oklch(0.66 0.02 250);
+  --st-cancelled: oklch(0.66 0.08 300);
+}
+
+[data-theme="carbon"] {
+  --bg: #0b0b0d;
+  --panel: #141416;
+  --panel-2: #18181b;
+  --panel-3: #1e1e22;
+  --border: #2a2a2e;
+  --border-soft: #1f1f23;
+  --text: #e8e8ea;
+  --text-dim: #9a9aa0;
+  --text-faint: #5c5c63;
+  --accent: oklch(0.72 0.12 256);
+  --accent-ink: #06101c;
+  --row-hover: #1a1a1e;
+  --row-sel: #20232b;
+}
+[data-theme="terminal"] {
+  --bg: #060a07;
+  --panel: #0a110c;
+  --panel-2: #0d160f;
+  --panel-3: #112016;
+  --border: #1c2e21;
+  --border-soft: #142319;
+  --text: #c8f0d2;
+  --text-dim: #6fae84;
+  --text-faint: #3e6b4e;
+  --accent: oklch(0.82 0.18 145);
+  --accent-ink: #04140a;
+  --row-hover: #0e1a12;
+  --row-sel: #122819;
+}
+[data-theme="midnight"] {
+  --bg: #0a0c16;
+  --panel: #10131f;
+  --panel-2: #141826;
+  --panel-3: #191e30;
+  --border: #242a3f;
+  --border-soft: #1b2032;
+  --text: #e3e6f3;
+  --text-dim: #969db8;
+  --text-faint: #5a6080;
+  --accent: oklch(0.70 0.15 285);
+  --accent-ink: #0c0820;
+  --row-hover: #161a2a;
+  --row-sel: #1d2540;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+#root { height: 100vh; }
+
+/* density */
+:root { --row-py: 9px; --cell-fs: 12.5px; --pad: 16px; }
+[data-density="compact"] { --row-py: 6px; --cell-fs: 12px; --pad: 12px; }
+[data-density="ultra"] { --row-py: 3.5px; --cell-fs: 11.5px; --pad: 10px; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+.mono { font-family: var(--mono); font-feature-settings: 'zero' 1; }
+.dim { color: var(--text-dim); }
+.faint { color: var(--text-faint); }
+
+/* ---------- app shell ---------- */
+.app { display: grid; grid-template-columns: 212px 1fr; height: 100vh; }
+
+.sidebar {
+  background: var(--panel); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.brand { display: flex; align-items: center; gap: 9px; padding: 15px 16px; border-bottom: 1px solid var(--border-soft); }
+.brand-mark { width: 22px; height: 22px; border-radius: 5px; background: var(--accent);
+  display: grid; place-items: center; flex: none; }
+.brand-mark span { color: var(--accent-ink); font-weight: 700; font-size: 13px; font-family: var(--mono); }
+.brand-name { font-weight: 600; letter-spacing: -0.01em; font-size: 13.5px; }
+.brand-name b { color: var(--accent); font-weight: 600; }
+.brand-sub { font-size: 10px; color: var(--text-faint); font-family: var(--mono); letter-spacing: 0.04em; }
+
+.nav { padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.nav-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint);
+  padding: 12px 10px 5px; }
+.nav-item { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 6px;
+  color: var(--text-dim); cursor: pointer; font-size: 12.5px; font-weight: 500; user-select: none;
+  border: 1px solid transparent; }
+.nav-item:hover { background: var(--row-hover); color: var(--text); }
+.nav-item.active { background: var(--panel-3); color: var(--text); border-color: var(--border); }
+.nav-item .ic { width: 15px; height: 15px; flex: none; opacity: 0.85; }
+.nav-item.active .ic { color: var(--accent); opacity: 1; }
+.nav-item .count { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+  background: var(--panel-2); padding: 1px 6px; border-radius: 9px; border: 1px solid var(--border-soft); }
+.nav-item.active .count { color: var(--text-dim); }
+.sidebar-foot { margin-top: auto; padding: 12px 14px; border-top: 1px solid var(--border-soft);
+  font-size: 10.5px; color: var(--text-faint); font-family: var(--mono); display: flex; flex-direction: column; gap: 5px; }
+
+/* ---------- main ---------- */
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.topbar { display: flex; align-items: center; gap: 14px; padding: 11px var(--pad);
+  border-bottom: 1px solid var(--border); background: var(--panel); flex: none; }
+.topbar h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.topbar .crumb { color: var(--text-faint); font-weight: 400; }
+.spacer { flex: 1; }
+
+.live { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px;
+  color: var(--text-dim); padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel-2); cursor: pointer; user-select: none; }
+.live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+.live.on .dot { background: var(--st-completed); box-shadow: 0 0 0 0 var(--st-completed); animation: pulse 1.6s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--st-completed) 60%, transparent); }
+  70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.live.on { color: var(--text); border-color: color-mix(in oklch, var(--st-completed) 40%, var(--border)); }
+
+.poll { display: flex; align-items: center; gap: 8px; }
+.poll.off { opacity: 0.45; }
+.poll-l { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.poll-v { font-size: 11px; color: var(--text-dim); min-width: 22px; text-align: right; }
+.poll input[type=range] { -webkit-appearance: none; appearance: none; width: 88px; height: 4px; border-radius: 3px;
+  background: var(--panel-3); cursor: pointer; }
+.poll input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 13px; height: 13px;
+  border-radius: 50%; background: var(--accent); border: 2px solid var(--panel); cursor: pointer; }
+.poll input[type=range]::-moz-range-thumb { width: 13px; height: 13px; border-radius: 50%; background: var(--accent);
+  border: 2px solid var(--panel); cursor: pointer; }
+
+.btn { font-family: var(--sans); font-size: 12px; font-weight: 500; color: var(--text-dim);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 11px;
+  cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover { background: var(--panel-3); color: var(--text); }
+.btn .ic { width: 14px; height: 14px; }
+
+/* ---------- toolbar / filters ---------- */
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 9px var(--pad);
+  border-bottom: 1px solid var(--border-soft); background: var(--panel); flex: none; flex-wrap: wrap; }
+.search { display: flex; align-items: center; gap: 7px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 9px; min-width: 230px; }
+.search input { background: none; border: none; outline: none; color: var(--text); font-family: var(--mono);
+  font-size: 12px; width: 100%; }
+.search input::placeholder { color: var(--text-faint); }
+.search .ic { width: 14px; height: 14px; color: var(--text-faint); flex: none; }
+.search kbd { font-family: var(--mono); font-size: 10px; color: var(--text-faint); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 4px; }
+
+.chips { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+.chip { font-size: 11px; font-family: var(--mono); padding: 4px 9px; border-radius: 20px; cursor: pointer;
+  border: 1px solid var(--border); color: var(--text-dim); background: var(--panel-2); user-select: none;
+  display: inline-flex; align-items: center; gap: 5px; }
+.chip:hover { color: var(--text); border-color: var(--text-faint); }
+.chip.on { color: var(--text); background: var(--panel-3); border-color: var(--text-faint); }
+.chip .sw { width: 7px; height: 7px; border-radius: 50%; }
+.sel { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; cursor: pointer; }
+.sel:focus { outline: none; border-color: var(--text-faint); }
+.tb-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+
+/* custom filter dropdowns */
+.dd { position: relative; }
+.dd-trigger { display: inline-flex; align-items: center; gap: 8px; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; cursor: pointer; height: 30px;
+  font-family: var(--sans); color: var(--text-dim); }
+.dd-trigger:hover { background: var(--panel-3); color: var(--text); }
+.dd-trigger.open { border-color: var(--text-faint); background: var(--panel-3); }
+.dd-trigger.active { border-color: color-mix(in oklch, var(--accent) 55%, var(--border)); color: var(--text); }
+.dd-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.dd-trigger.active .dd-label { color: color-mix(in oklch, var(--accent) 90%, var(--text)); }
+.dd-summary { font-size: 12px; font-weight: 500; font-family: var(--mono); white-space: nowrap; }
+.dd-caret { font-size: 9px; color: var(--text-faint); margin-left: -2px; }
+.dd-panel { position: absolute; top: calc(100% + 6px); left: 0; z-index: 35; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 16px 44px rgba(0,0,0,0.5);
+  padding: 6px; animation: ddpop 0.13s ease; overflow: hidden; }
+.dd-panel.right { left: auto; right: 0; }
+@keyframes ddpop { from { opacity: 0; transform: translateY(-4px); } }
+.dd-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 8px;
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint);
+  border-bottom: 1px solid var(--border-soft); margin-bottom: 4px; }
+.dd-clear { background: none; border: none; color: var(--accent); font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.05em; cursor: pointer; padding: 0; }
+.dd-clear:hover { text-decoration: underline; }
+.dd-opts { display: flex; flex-direction: column; gap: 1px; max-height: 280px; overflow: auto; }
+.dd-opt { display: flex; align-items: center; gap: 9px; padding: 7px 8px; border-radius: 6px; cursor: pointer;
+  background: none; border: none; color: var(--text-dim); font-family: var(--sans); font-size: 12.5px; text-align: left; width: 100%; }
+.dd-opt:hover { background: var(--row-hover); color: var(--text); }
+.dd-opt.on { color: var(--text); }
+.dd-check { width: 15px; height: 15px; flex: none; border: 1px solid var(--border); border-radius: 4px;
+  display: grid; place-items: center; color: var(--accent-ink); }
+.dd-check.on { background: var(--accent); border-color: var(--accent); }
+.dd-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.dd-optl { flex: 1 1 auto; min-width: 0; font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-empty { padding: 10px 8px; color: var(--text-faint); font-family: var(--mono); font-size: 11px; }
+.dd-custom { border-top: 1px solid var(--border-soft); margin-top: 5px; padding: 9px 8px 5px;
+  display: flex; flex-direction: column; gap: 9px; }
+.dr-field { display: flex; flex-direction: column; gap: 4px; font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.dr-field input { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+  font-family: var(--mono); font-size: 12px; padding: 6px 8px; color-scheme: dark; width: 100%; }
+.dr-field input:focus { outline: none; border-color: var(--text-faint); }
+
+.btn.reset { color: var(--text-dim); }
+.btn.reset.off { opacity: 0.38; cursor: default; }
+.btn.reset:not(.off):hover { color: var(--st-failed); border-color: color-mix(in oklch, var(--st-failed) 40%, var(--border)); }
+
+/* ---------- table ---------- */
+.tablewrap { flex: 1; overflow: auto; min-height: 0; }
+table.grid { width: 100%; border-collapse: collapse; font-size: var(--cell-fs); }
+table.grid thead th { position: sticky; top: 0; z-index: 2; background: var(--panel);
+  text-align: left; font-weight: 500; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-faint); padding: 8px var(--pad); border-bottom: 1px solid var(--border);
+  white-space: nowrap; cursor: pointer; user-select: none; }
+table.grid thead th:hover { color: var(--text-dim); }
+table.grid thead th .arr { opacity: 0.7; margin-left: 3px; }
+table.grid tbody td { padding: var(--row-py) var(--pad); border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap; vertical-align: middle; }
+table.grid tbody tr { cursor: pointer; }
+table.grid tbody tr:hover { background: var(--row-hover); }
+table.grid tbody tr.sel { background: var(--row-sel); }
+table.grid tbody tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.cellmono { font-family: var(--mono); }
+.actname { font-weight: 600; color: var(--text); }
+.wfref { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.wfref b { color: var(--text-dim); font-weight: 500; }
+.muted-id { color: var(--text-faint); font-family: var(--mono); font-size: 11px; }
+.qtag { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); background: var(--panel-2);
+  border: 1px solid var(--border-soft); border-radius: 4px; padding: 1px 6px; }
+.attempt-pill { font-family: var(--mono); font-size: 11px; }
+.attempt-pill.warn { color: var(--st-retrying); }
+.attempt-pill.bad { color: var(--st-failed); }
+.dur-bar { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); }
+.dur-bar .track { width: 46px; height: 4px; border-radius: 2px; background: var(--panel-3); overflow: hidden; }
+.dur-bar .fill { height: 100%; border-radius: 2px; }
+
+/* status badge */
+.sb { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px;
+  font-weight: 500; padding: 2px 8px 2px 7px; border-radius: 5px; white-space: nowrap;
+  border: 1px solid color-mix(in oklch, var(--c) 35%, transparent);
+  color: var(--c); background: color-mix(in oklch, var(--c) 12%, transparent); }
+.sb .d { width: 6px; height: 6px; border-radius: 50%; background: var(--c); flex: none; }
+.sb.spin .d { animation: blink 1.1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0.3; } }
+
+/* ---------- detail panel ---------- */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 40; }
+.detail { background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column;
+  min-height: 0; }
+.detail.panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 90vw); z-index: 41;
+  box-shadow: -24px 0 60px rgba(0,0,0,0.4); animation: slidein 0.18s ease; }
+@keyframes slidein { from { transform: translateX(24px); opacity: 0.6; } }
+.detail-head { padding: 14px var(--pad); border-bottom: 1px solid var(--border); flex: none; }
+.detail-title { display: flex; align-items: center; gap: 10px; }
+.detail-title h2 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+.detail-meta { display: flex; gap: 14px; margin-top: 9px; flex-wrap: wrap; font-family: var(--mono); font-size: 11px;
+  color: var(--text-faint); }
+.detail-meta b { color: var(--text-dim); font-weight: 500; }
+.detail-body { overflow: auto; flex: 1; min-height: 0; }
+.x { margin-left: auto; cursor: pointer; color: var(--text-faint); width: 26px; height: 26px;
+  display: grid; place-items: center; border-radius: 6px; }
+.x:hover { background: var(--panel-3); color: var(--text); }
+
+.section { border-bottom: 1px solid var(--border-soft); padding: 14px var(--pad); }
+.section-h { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-faint);
+  margin: 0 0 11px; display: flex; align-items: center; gap: 8px; }
+.section-h .n { color: var(--text-dim); font-family: var(--mono); }
+
+.kv { display: grid; grid-template-columns: 120px 1fr; gap: 7px 14px; font-size: 12px; }
+.kv dt { color: var(--text-faint); font-family: var(--mono); font-size: 11px; }
+.kv dd { margin: 0; color: var(--text); font-family: var(--mono); font-size: 11.5px; word-break: break-word; }
+
+/* attempts list */
+.attempts { display: flex; flex-direction: column; gap: 0; }
+.attempt { display: grid; grid-template-columns: 22px 1fr; gap: 10px; position: relative; padding-bottom: 14px; }
+.attempt:last-child { padding-bottom: 0; }
+.attempt .rail { display: flex; flex-direction: column; align-items: center; }
+.attempt .node { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--c); background: var(--bg);
+  margin-top: 2px; flex: none; z-index: 1; }
+.attempt .node.fill { background: var(--c); }
+.attempt .line { width: 2px; flex: 1; background: var(--border); margin: 3px 0 -3px; }
+.attempt .body { min-width: 0; }
+.attempt .row1 { display: flex; align-items: baseline; gap: 9px; }
+.attempt .row1 .att { font-family: var(--mono); font-weight: 600; font-size: 12px; }
+.attempt .row1 .t { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); margin-left: auto; }
+.attempt .err { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--st-failed);
+  background: color-mix(in oklch, var(--st-failed) 9%, transparent);
+  border: 1px solid color-mix(in oklch, var(--st-failed) 22%, transparent);
+  border-radius: 5px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
+.attempt .retrymeta { margin-top: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--st-retrying); }
+
+/* json viewer */
+.json { font-family: var(--mono); font-size: 11.5px; line-height: 1.55; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 7px; padding: 11px 12px; overflow: auto; max-height: 280px;
+  white-space: pre; color: var(--text-dim); }
+.json .k { color: var(--accent); }
+.json .s { color: var(--st-completed); }
+.json .n { color: var(--st-running); }
+.json .b { color: var(--st-retrying); }
+.json .null { color: var(--text-faint); }
+.payload-tabs { display: flex; gap: 4px; margin-bottom: 9px; }
+.payload-tabs .pt { font-family: var(--mono); font-size: 11px; padding: 4px 10px; border-radius: 5px;
+  cursor: pointer; color: var(--text-dim); border: 1px solid transparent; }
+.payload-tabs .pt:hover { color: var(--text); }
+.payload-tabs .pt.on { background: var(--panel-3); border-color: var(--border); color: var(--text); }
+
+/* event timeline (in detail) */
+.evlog { display: flex; flex-direction: column; }
+.evrow { display: grid; grid-template-columns: 78px 18px 1fr; gap: 10px; align-items: start;
+  padding: 5px 0; font-family: var(--mono); font-size: 11px; }
+.evrow .ts { color: var(--text-faint); font-size: 10.5px; padding-top: 1px; }
+.evrow .gut { display: flex; flex-direction: column; align-items: center; }
+.evrow .gut .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); margin-top: 4px; flex: none; }
+.evrow .gut .ln { width: 2px; flex: 1; background: var(--border-soft); min-height: 8px; margin: 2px 0 -5px; }
+.evrow:last-child .gut .ln { display: none; }
+.evrow .et { color: var(--text); }
+.evrow .ed { color: var(--text-faint); margin-top: 1px; word-break: break-word; white-space: pre-wrap; }
+
+/* empty / banners */
+.empty { display: grid; place-items: center; height: 100%; color: var(--text-faint); text-align: center; gap: 8px; }
+.empty .ic { width: 30px; height: 30px; opacity: 0.5; }
+.banner { display: flex; align-items: flex-start; gap: 9px; margin: var(--pad); padding: 11px 13px;
+  border: 1px dashed color-mix(in oklch, var(--st-retrying) 40%, var(--border)); border-radius: 8px;
+  background: color-mix(in oklch, var(--st-retrying) 7%, transparent); color: var(--text-dim); font-size: 12px; }
+.banner .ic { width: 16px; height: 16px; color: var(--st-retrying); flex: none; margin-top: 1px; }
+.banner code { font-family: var(--mono); color: var(--text); background: var(--panel-2); padding: 1px 5px;
+  border-radius: 4px; font-size: 11px; }
+
+/* stat cards */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 1px;
+  background: var(--border-soft); border-bottom: 1px solid var(--border); flex: none; }
+.stat { background: var(--panel); padding: 12px var(--pad); }
+.stat .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.stat .val { font-family: var(--mono); font-size: 22px; font-weight: 600; margin-top: 3px; letter-spacing: -0.02em; }
+.stat .val small { font-size: 12px; color: var(--text-faint); font-weight: 400; }
+.stat .spark { display: flex; align-items: flex-end; gap: 2px; height: 18px; margin-top: 6px; }
+.stat .spark i { flex: 1; background: var(--accent); opacity: 0.5; border-radius: 1px; min-height: 2px; }
+
+/* worker cards */
+.workers { padding: var(--pad); display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;
+  overflow: auto; }
+.wcard { background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 13px 14px; }
+.wcard .wh { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wcard .wh .name { font-family: var(--mono); font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wcard .wq { display: flex; gap: 4px; flex-wrap: wrap; margin: 10px 0; }
+.wcard .load { height: 6px; background: var(--panel-3); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.wcard .load i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.wcard .wmeta { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-faint); margin-top: 9px; }
+
+/* ---------- workflow modal ---------- */
+.wfm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(2px);
+  z-index: 50; display: grid; place-items: center; padding: 4vh 24px; animation: fade 0.16s ease; }
+@keyframes fade { from { opacity: 0; } }
+.wfm { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  width: min(1060px, 96vw); max-height: 92vh; display: flex; flex-direction: column; min-height: 0;
+  box-shadow: 0 30px 90px rgba(0,0,0,0.55); animation: pop 0.18s cubic-bezier(.2,.8,.2,1); overflow: hidden; }
+@keyframes pop { from { transform: translateY(10px) scale(0.99); opacity: 0.4; } }
+.wfm-head { padding: 16px var(--pad) 13px; border-bottom: 1px solid var(--border); flex: none; }
+.wfm-titlerow { display: flex; align-items: center; gap: 11px; }
+.wfm-titlerow h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.wfm-id { font-family: var(--mono); color: var(--text-faint); font-size: 13px; }
+.wfm-sub { display: flex; gap: 18px; margin-top: 10px; color: var(--text-faint); font-size: 11px; }
+.wfm-sub span { display: inline-flex; align-items: center; gap: 5px; }
+.wfm-sub .ic { width: 12px; height: 12px; opacity: 0.8; }
+
+.wfm-fields { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border-soft);
+  border-bottom: 1px solid var(--border); flex: none; }
+.wfm-field { background: var(--panel); padding: 10px var(--pad); }
+.wfm-fl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.wfm-fv { margin-top: 4px; font-size: 12.5px; color: var(--text); }
+.wfm-fv.mono { font-family: var(--mono); font-size: 12px; }
+.wfm-err { display: flex; align-items: center; gap: 8px; padding: 9px var(--pad); flex: none;
+  color: var(--st-failed); font-size: 11.5px; background: color-mix(in oklch, var(--st-failed) 9%, transparent);
+  border-bottom: 1px solid var(--border-soft); }
+.wfm-err .ic { flex: none; }
+
+.wfm-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); flex: none;
+  background: var(--panel); }
+.wfm-tab { font-family: var(--sans); font-size: 12.5px; font-weight: 500; color: var(--text-dim);
+  background: none; border: none; border-bottom: 2px solid transparent; padding: 11px 13px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px; margin-bottom: -1px; }
+.wfm-tab:hover { color: var(--text); }
+.wfm-tab.on { color: var(--text); border-bottom-color: var(--accent); }
+.wfm-tab .n { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+  background: var(--panel-3); border: 1px solid var(--border-soft); border-radius: 9px; padding: 0 6px; }
+.wfm-tab.on .n { color: var(--text-dim); }
+.wfm-tab .ic { opacity: 0.85; }
+.wfm-body { overflow: auto; flex: 1; min-height: 0; padding: var(--pad); }
+
+/* ---------- gantt ---------- */
+.gantt { font-family: var(--mono); }
+.gantt-axis { display: grid; grid-template-columns: 210px 1fr; gap: 14px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--border); margin-bottom: 4px; position: sticky; top: calc(-1 * var(--pad));
+  background: var(--panel); z-index: 2; }
+.gantt-axhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
+  align-self: end; }
+.gantt-axtrack { position: relative; height: 16px; }
+.gantt-tick { position: absolute; top: 0; transform: translateX(-50%); }
+.gantt-tick:first-child { transform: none; }
+.gantt-ticklbl { font-size: 10px; color: var(--text-faint); white-space: nowrap; }
+.gantt-rows { display: flex; flex-direction: column; }
+.gantt-row { display: grid; grid-template-columns: 210px 1fr; gap: 14px; align-items: center;
+  padding: 7px 0; cursor: pointer; border-radius: 5px; }
+.gantt-row:hover { background: var(--row-hover); }
+.gantt-row.open { background: var(--row-sel); }
+.gantt-label { display: flex; align-items: center; gap: 8px; min-width: 0; padding-left: 4px; }
+.gl-seq { width: 18px; height: 18px; flex: none; display: grid; place-items: center; font-size: 10px;
+  color: var(--text-faint); background: var(--panel-3); border-radius: 4px; }
+.gl-name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-att { font-size: 10.5px; color: var(--st-retrying); flex: none; }
+.gantt-track { position: relative; height: 22px; background: var(--bg); border-radius: 5px; overflow: hidden;
+  border: 1px solid var(--border-soft); }
+.gantt-grid { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border-soft); opacity: 0.6; }
+.gantt-seg { position: absolute; top: 3px; height: 16px; border-radius: 3px; min-width: 3px;
+  background: color-mix(in oklch, var(--c) 78%, transparent); border: 1px solid var(--c); box-sizing: border-box; }
+.gantt-seg.live { background: repeating-linear-gradient(45deg,
+  color-mix(in oklch, var(--c) 60%, transparent) 0 6px, color-mix(in oklch, var(--c) 30%, transparent) 6px 12px);
+  animation: slide 0.7s linear infinite; }
+@keyframes slide { from { background-position: 0 0; } to { background-position: 17px 0; } }
+.gantt-gap { position: absolute; top: 9px; height: 4px; border-radius: 2px;
+  background: repeating-linear-gradient(90deg, var(--st-retrying) 0 3px, transparent 3px 7px); opacity: 0.6; }
+.gantt-detail { margin: 2px 0 8px; padding: 11px 13px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 7px; }
+.gd-meta { display: flex; flex-wrap: wrap; gap: 16px; font-size: 11px; align-items: center; }
+.gd-meta b { color: var(--text-faint); font-weight: 400; margin-right: 4px; }
+.gd-err { margin-top: 9px; font-size: 11px; color: var(--st-failed);
+  background: color-mix(in oklch, var(--st-failed) 9%, transparent);
+  border: 1px solid color-mix(in oklch, var(--st-failed) 22%, transparent); border-radius: 5px;
+  padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
+.gd-io { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.gd-iol, .io-l { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
+  margin-bottom: 5px; }
+@media (max-width: 720px) { .gd-io { grid-template-columns: 1fr; } .wfm-fields { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---------- event table ---------- */
+.evtable { font-family: var(--mono); font-size: 11.5px; }
+.evt-head, .evt-row { display: grid; grid-template-columns: 92px 54px 230px 130px 1fr; gap: 12px; align-items: center; }
+.evt-head { color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 6px 8px; border-bottom: 1px solid var(--border); position: sticky; top: calc(-1 * var(--pad));
+  background: var(--panel); z-index: 2; }
+.evt-row { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); }
+.evt-row.clickable { cursor: pointer; }
+.evt-row.clickable:hover { background: var(--row-hover); }
+.evt-time, .evt-eid { color: var(--text-faint); }
+.evt-type { display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evt-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.evt-act { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evt-prev { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evt-exp { color: var(--text-faint); margin-left: 7px; }
+.evt-payload { padding: 4px 8px 10px 158px; }
+
+/* formatted event detail tokens */
+.evd { white-space: nowrap; }
+.evd .att { color: var(--text); font-weight: 500; }
+.evd .lab { color: var(--text-faint); }
+.evd .args { color: var(--text-dim); }
+.evd .err { color: var(--st-failed); }
+.evd .warn { color: var(--st-retrying); }
+.evd .ok { color: var(--st-completed); }
+.evd .meta { color: var(--text-faint); }
+.evd .sep { color: var(--text-faint); margin: 0 5px; }
+
+/* pagination */
+.pager { display: flex; align-items: center; gap: 12px; padding: 8px var(--pad); border-top: 1px solid var(--border);
+  background: var(--panel); flex: none; font-family: var(--mono); font-size: 11.5px; }
+.pg-info { color: var(--text-faint); }
+.pg-ctrls { display: flex; align-items: center; gap: 8px; }
+.pg-btn { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.pg-btn:hover:not(:disabled) { background: var(--panel-3); color: var(--text); }
+.pg-btn:disabled { opacity: 0.4; cursor: default; }
+.pg-pages { display: flex; gap: 3px; }
+.pg-num { min-width: 26px; height: 26px; display: grid; place-items: center; font-family: var(--mono);
+  font-size: 11.5px; color: var(--text-dim); background: none; border: 1px solid transparent; border-radius: 6px;
+  cursor: pointer; padding: 0 6px; }
+.pg-num:hover { background: var(--row-hover); color: var(--text); }
+.pg-num.on { background: var(--panel-3); border-color: var(--border); color: var(--text); }
+.pg-ell { color: var(--text-faint); padding: 0 2px; align-self: center; }
+
+/* ---------- input/result panel ---------- */
+.io-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 720px) { .io-panel { grid-template-columns: 1fr; } }
+
+.flash { animation: flash 1.1s ease; }
+@keyframes flash { 0% { background: color-mix(in oklch, var(--accent) 22%, transparent); } 100% { background: transparent; } }
+
+/* ---------- metrics (grafana-style) ---------- */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: var(--pad) var(--pad) 0; }
+.kpi { background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px 8px; }
+.kpi-l { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.kpi-v { font-size: 30px; font-weight: 600; margin: 4px 0 6px; letter-spacing: -0.02em; line-height: 1; }
+.kpi-v small { font-size: 11px; color: var(--text-faint); font-weight: 400; letter-spacing: 0; }
+.kpi-spark { height: 36px; }
+
+.gpanels { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 12px; padding: 12px var(--pad) var(--pad); }
+.gpanel { background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px 10px; }
+.gpanel-h { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.gpanel-t { font-size: 12px; font-weight: 500; color: var(--text); }
+.legend { display: flex; gap: 12px; margin-left: auto; }
+.lg { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); }
+.lg-d { width: 8px; height: 2px; border-radius: 1px; }
+
+.chart { display: grid; grid-template-columns: 36px 1fr; gap: 8px; }
+.chart-y { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end;
+  font-size: 9.5px; color: var(--text-faint); padding-bottom: 16px; }
+.chart-main { min-width: 0; }
+.chart .grid-l { stroke: var(--border-soft); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart-x { display: flex; justify-content: space-between; font-size: 9.5px; color: var(--text-faint); margin-top: 4px; }
+
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <script>
+/* temporal-lite — mock engine
+ * Faithful to the real backend: there is NO activity table.
+ * Activities are RECONSTRUCTED from the wflow.events log (ACTIVITY_* events)
+ * plus wflow.schedule (retry wakeups). deriveActivities() does that reconstruction.
+ * Everything is exposed on window for the babel component scripts.
+ */
+(function () {
+  // ---- seeded RNG so the initial dataset is stable across reloads ----
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  let rng = mulberry32(20260531);
+  const rand = () => rng();
+  const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+  const ri = (lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
+
+  // ---- domain catalog ----
+  const TASK_QUEUES = ['default', 'payments', 'media', 'reports', 'notify'];
+
+  const TEMPLATES = [
+    { type: 'OrderWorkflow', queue: 'payments',
+      acts: [
+        { name: 'ValidateOrder', ms: [120, 400], fail: 0.04 },
+        { name: 'ChargeCard', ms: [600, 2200], fail: 0.22 },
+        { name: 'ReserveInventory', ms: [300, 900], fail: 0.08 },
+        { name: 'SendConfirmation', ms: [200, 700], fail: 0.05 },
+      ],
+      input: () => ({ orderId: ri(1000, 9999), amount: +(rand() * 480 + 9).toFixed(2), currency: 'USD' }) },
+    { type: 'UserOnboardingWorkflow', queue: 'notify',
+      acts: [
+        { name: 'ProvisionAccount', ms: [400, 1200], fail: 0.06 },
+        { name: 'SendWelcomeEmail', ms: [150, 600], fail: 0.12 },
+        { name: 'SyncCRM', ms: [500, 2600], fail: 0.18 },
+      ],
+      input: () => ({ userId: 'usr_' + ri(10000, 99999), plan: pick(['free', 'pro', 'team']) }) },
+    { type: 'PaymentReconciliation', queue: 'payments',
+      acts: [
+        { name: 'FetchTransactions', ms: [700, 2400], fail: 0.05 },
+        { name: 'MatchLedger', ms: [900, 3200], fail: 0.10 },
+        { name: 'FlagDiscrepancies', ms: [250, 800], fail: 0.07 },
+      ],
+      input: () => ({ batchId: 'rec_' + ri(2000, 9000), window: pick(['1h', '24h', '7d']) }) },
+    { type: 'DataExportWorkflow', queue: 'reports',
+      acts: [
+        { name: 'QueryWarehouse', ms: [1200, 4800], fail: 0.09 },
+        { name: 'RenderReport', ms: [800, 2600], fail: 0.06 },
+        { name: 'UploadToS3', ms: [400, 1500], fail: 0.14 },
+        { name: 'NotifyUser', ms: [120, 400], fail: 0.04 },
+      ],
+      input: () => ({ reportId: 'rpt_' + ri(100, 999), format: pick(['csv', 'parquet', 'xlsx']) }) },
+    { type: 'ImageProcessing', queue: 'media',
+      acts: [
+        { name: 'DownloadAsset', ms: [300, 1400], fail: 0.10 },
+        { name: 'ResizeVariants', ms: [600, 2200], fail: 0.05 },
+        { name: 'RunOCR', ms: [1500, 5200], fail: 0.16 },
+        { name: 'IndexSearch', ms: [200, 700], fail: 0.06 },
+      ],
+      input: () => ({ assetId: 'img_' + ri(100000, 999999), variants: ri(2, 5) }) },
+  ];
+
+  const ERRORS = [
+    { msg: 'java.net.SocketTimeoutException: Read timed out', kind: 'timeout' },
+    { msg: 'io.grpc.StatusRuntimeException: UNAVAILABLE: connection refused', kind: 'fail' },
+    { msg: 'com.stripe.exception.RateLimitException: Too many requests (429)', kind: 'fail' },
+    { msg: 'org.postgresql.util.PSQLException: deadlock detected', kind: 'fail' },
+    { msg: 'java.lang.IllegalStateException: ledger account not found', kind: 'fail' },
+    { msg: 'software.amazon.awssdk.services.s3.S3Exception: SlowDown (503)', kind: 'fail' },
+  ];
+
+  // ---- id sequences ----
+  let WF_ID = 100;
+  let EV_ID = 10000;
+
+  // builds the event stream for one workflow, returns {workflow, events}
+  function buildWorkflow(now, ageMs, forceState) {
+    const tpl = pick(TEMPLATES);
+    const wfId = ++WF_ID;
+    const createdAt = now - ageMs;
+    const input = tpl.input();
+    const events = [];
+    let t = createdAt;
+    const ev = (eventType, o) => {
+      events.push({
+        id: ++EV_ID, workflowId: wfId, eventType,
+        commandType: o.commandType ?? null, seq: o.seq ?? null,
+        activityName: o.activityName ?? null,
+        payload: o.payload != null ? JSON.stringify(o.payload) : null,
+        createdAt: new Date(t).toISOString(),
+      });
+    };
+
+    ev('WORKFLOW_CREATED', { payload: input });
+    t += ri(20, 120);
+    ev('WORKFLOW_TASK_QUEUED', {});
+    t += ri(40, 300);
+    ev('WORKFLOW_TASK_STARTED', {});
+
+    // decide overall outcome
+    const outcome = forceState || pick(['COMPLETED', 'COMPLETED', 'COMPLETED', 'FAILED', 'RUNNING', 'RUNNING']);
+    let status = 'RUNNING', result = null, error = null, completedAt = null;
+    let seq = 0;
+    let died = false;
+    // if this workflow is destined to fail, pick the activity that dies
+    const failAt = outcome === 'FAILED' ? ri(0, tpl.acts.length - 1) : -1;
+
+    for (let i = 0; i < tpl.acts.length; i++) {
+      const act = tpl.acts[i];
+      seq++;
+      const maxAttempts = 4;
+      let attempt = 0;
+      let done = false;
+
+      // if RUNNING outcome and we've reached a cutoff, leave this activity in-flight
+      const isLastReachable = outcome === 'RUNNING' && i === Math.min(tpl.acts.length - 1, ri(0, tpl.acts.length - 1));
+
+      while (attempt < maxAttempts && !done) {
+        attempt++;
+        ev('ACTIVITY_STARTED', { commandType: 'ACTIVITY', seq, activityName: act.name,
+          payload: { attempt, args: input } });
+        const dur = ri(act.ms[0], act.ms[1]);
+
+        if (isLastReachable && attempt === 1) {
+          // freeze: this activity is still running "now"
+          t = now - ri(200, Math.max(400, Math.floor(dur * 0.6)));
+          status = 'RUNNING';
+          done = true; died = true; break;
+        }
+
+        t += dur;
+        const forceFail = i === failAt;
+        const willFail = forceFail || rand() < act.fail;
+        if (willFail && attempt < maxAttempts) {
+          const e = pick(ERRORS);
+          const evType = e.kind === 'timeout' ? 'ACTIVITY_TIMEOUT' : 'ACTIVITY_FAILED';
+          ev(evType, { commandType: 'ACTIVITY', seq, activityName: act.name,
+            payload: { attempt, error: e.msg } });
+          const backoff = Math.min(30000, 500 * Math.pow(2, attempt - 1)) + ri(0, 400);
+          ev('ACTIVITY_RETRY_SCHEDULED', { commandType: 'ACTIVITY', seq, activityName: act.name,
+            payload: { attempt, nextAttempt: attempt + 1, backoffMs: backoff,
+              fireAt: new Date(t + backoff).toISOString(), error: e.msg } });
+          t += backoff;
+        } else if (willFail) {
+          // exhausted -> activity dead -> workflow fails
+          const e = pick(ERRORS);
+          ev('ACTIVITY_FAILED', { commandType: 'ACTIVITY', seq, activityName: act.name,
+            payload: { attempt, error: e.msg, terminal: true } });
+          error = act.name + ': ' + e.msg;
+          status = 'FAILED'; died = true; done = true;
+          break;
+        } else {
+          const out = activityOutput(act.name, input);
+          ev('ACTIVITY_COMPLETED', { commandType: 'ACTIVITY', seq, activityName: act.name,
+            payload: out });
+          done = true;
+        }
+      }
+      if (died) break;
+    }
+
+    if (!died && outcome !== 'RUNNING') {
+      result = workflowResult(tpl.type, input);
+      t += ri(20, 80);
+      ev('WORKFLOW_COMPLETED', { payload: result });
+      status = 'COMPLETED'; completedAt = new Date(t).toISOString();
+    } else if (status === 'FAILED') {
+      t += ri(20, 80);
+      ev('WORKFLOW_FAILED', { payload: { error } });
+      completedAt = new Date(t).toISOString();
+    }
+
+    const workflow = {
+      id: wfId, workflowType: tpl.type, status,
+      input: JSON.stringify(input),
+      result: result ? JSON.stringify(result) : null,
+      error,
+      taskQueue: tpl.queue,
+      createdAt: new Date(createdAt).toISOString(),
+      updatedAt: new Date(t).toISOString(),
+      completedAt,
+    };
+    return { workflow, events };
+  }
+
+  function activityOutput(name, input) {
+    switch (name) {
+      case 'ChargeCard': return { charged: true, txn: 'ch_' + Math.floor(rand() * 1e9).toString(36) };
+      case 'ReserveInventory': return { reserved: true, sku: ri(10, 99) };
+      case 'ValidateOrder': return { valid: true };
+      case 'SendConfirmation': case 'SendWelcomeEmail': case 'NotifyUser':
+        return { delivered: true, messageId: 'msg_' + ri(10000, 99999) };
+      case 'ProvisionAccount': return { accountId: 'acc_' + ri(1000, 9999) };
+      case 'SyncCRM': return { synced: true, records: ri(1, 12) };
+      case 'FetchTransactions': return { count: ri(40, 4000) };
+      case 'MatchLedger': return { matched: ri(30, 3900), unmatched: ri(0, 14) };
+      case 'FlagDiscrepancies': return { flagged: ri(0, 9) };
+      case 'QueryWarehouse': return { rows: ri(1000, 980000) };
+      case 'RenderReport': return { pages: ri(2, 80) };
+      case 'UploadToS3': return { key: 's3://exports/' + ri(1000, 9999) + '.dat', bytes: ri(2e5, 9e7) };
+      case 'DownloadAsset': return { bytes: ri(1e4, 8e6) };
+      case 'ResizeVariants': return { variants: input.variants ?? 3 };
+      case 'RunOCR': return { chars: ri(0, 18000), lang: 'en' };
+      case 'IndexSearch': return { indexed: true };
+      default: return { ok: true };
+    }
+  }
+  function workflowResult(type, input) {
+    switch (type) {
+      case 'OrderWorkflow': return { orderId: input.orderId, charged: true };
+      case 'UserOnboardingWorkflow': return { userId: input.userId, ready: true };
+      case 'PaymentReconciliation': return { batchId: input.batchId, discrepancies: ri(0, 6) };
+      case 'DataExportWorkflow': return { reportId: input.reportId, url: 's3://exports/' + input.reportId + '.' + input.format };
+      case 'ImageProcessing': return { assetId: input.assetId, indexed: true };
+      default: return { ok: true };
+    }
+  }
+
+  // ============================================================
+  //  ACTIVITY RECONSTRUCTION  — the heart of this UI.
+  //  There is no activity table; we fold the event stream.
+  // ============================================================
+  function deriveActivities(events, workflowsById) {
+    const groups = new Map(); // key = wfId:seq
+    for (const e of events) {
+      if (!e.activityName || e.seq == null) continue;
+      if (!e.eventType.startsWith('ACTIVITY_')) continue;
+      const key = e.workflowId + ':' + e.seq;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(e);
+    }
+    const out = [];
+    for (const [key, evs] of groups) {
+      evs.sort((a, b) => a.id - b.id);
+      const first = evs[0];
+      const wf = workflowsById[first.workflowId] || {};
+      const starts = evs.filter((e) => e.eventType === 'ACTIVITY_STARTED');
+      const last = evs[evs.length - 1];
+      const attempt = starts.length;
+      const maxAttempts = 4;
+
+      let status, endTime = null, lastError = null, nextRetryAt = null, output = null;
+      switch (last.eventType) {
+        case 'ACTIVITY_STARTED': status = 'RUNNING'; break;
+        case 'ACTIVITY_COMPLETED': status = 'COMPLETED'; endTime = last.createdAt; output = last.payload; break;
+        case 'ACTIVITY_RETRY_SCHEDULED': {
+          status = 'RETRYING';
+          try { const p = JSON.parse(last.payload || '{}'); nextRetryAt = p.fireAt; lastError = p.error; } catch (_) {}
+          break;
+        }
+        case 'ACTIVITY_TIMEOUT': status = 'TIMED_OUT'; endTime = last.createdAt;
+          try { lastError = JSON.parse(last.payload || '{}').error; } catch (_) {} break;
+        case 'ACTIVITY_FAILED': status = 'FAILED'; endTime = last.createdAt;
+          try { lastError = JSON.parse(last.payload || '{}').error; } catch (_) {} break;
+        default: status = 'RUNNING';
+      }
+      // surface latest non-terminal error even while retrying
+      for (const e of evs) {
+        if (e.eventType === 'ACTIVITY_FAILED' || e.eventType === 'ACTIVITY_TIMEOUT') {
+          try { const p = JSON.parse(e.payload || '{}'); if (p.error) lastError = p.error; } catch (_) {}
+        }
+      }
+      let input = null;
+      try { input = JSON.parse(first.payload || '{}').args; } catch (_) {}
+
+      const startTime = first.createdAt;
+      const startMs = Date.parse(startTime);
+      const endMs = endTime ? Date.parse(endTime) : null;
+
+      out.push({
+        id: key,
+        seq: first.seq,
+        name: first.activityName,
+        workflowId: first.workflowId,
+        workflowType: wf.workflowType || '—',
+        taskQueue: wf.taskQueue || 'default',
+        status,
+        attempt,
+        maxAttempts,
+        startTime,
+        endTime,
+        startMs,
+        endMs,
+        durationMs: endMs ? endMs - startMs : null,
+        input,
+        output: output,
+        lastError,
+        nextRetryAt,
+        events: evs,
+      });
+    }
+    out.sort((a, b) => b.startMs - a.startMs);
+    return out;
+  }
+
+  // ---- workers (no endpoint yet — synthetic, flagged in UI) ----
+  function buildWorkers(now) {
+    const hosts = ['wf-worker-a1', 'wf-worker-a2', 'wf-worker-b1', 'wf-worker-b2', 'wf-worker-c1'];
+    return hosts.map((h, i) => ({
+      id: h + '-' + Math.floor(rand() * 1e6).toString(36),
+      host: h,
+      taskQueues: i === 4 ? ['media'] : TASK_QUEUES.slice(0, ri(2, 4)),
+      status: i === 3 ? 'DRAINING' : 'ALIVE',
+      activeTasks: ri(0, 6),
+      capacity: 8,
+      pollRate: ri(40, 220),
+      lastHeartbeat: new Date(now - ri(200, 4200)).toISOString(),
+    }));
+  }
+
+  // ---- store assembly ----
+  function createStore() {
+    rng = mulberry32(20260531);
+    WF_ID = 100; EV_ID = 10000;
+    const now = Date.now();
+    const workflows = [];
+    let events = [];
+    // history: 22 workflows spread over the last ~40 min
+    const N = 22;
+    for (let i = 0; i < N; i++) {
+      const age = Math.floor((i / N) * 40 * 60000) + ri(2000, 40000);
+      // first few RUNNING (live board), a few FAILED for variety, rest mixed
+      const force = i < 4 ? 'RUNNING' : (i < 7 ? 'FAILED' : null);
+      const { workflow, events: evs } = buildWorkflow(now, age, force);
+      workflows.push(workflow);
+      events = events.concat(evs);
+    }
+    events.sort((a, b) => a.id - b.id);
+    return { now, workflows, events, workers: buildWorkers(now), nextEv: EV_ID, nextWf: WF_ID };
+  }
+
+  // ============================================================
+  //  LIVE SIMULATION — mutate store in place to mimic polling.
+  //  Advances running activities; fires retries; finishes/creates wfs.
+  // ============================================================
+  function tickSimulation(store) {
+    const now = Date.now();
+    store.now = now;
+    const byId = {};
+    store.workflows.forEach((w) => (byId[w.id] = w));
+    const acts = deriveActivities(store.events, byId);
+    let changed = false;
+
+    const pushEv = (wfId, eventType, o) => {
+      store.events.push({
+        id: ++store.nextEv, workflowId: wfId, eventType,
+        commandType: o.commandType ?? null, seq: o.seq ?? null,
+        activityName: o.activityName ?? null,
+        payload: o.payload != null ? JSON.stringify(o.payload) : null,
+        createdAt: new Date(now).toISOString(),
+      });
+      changed = true;
+    };
+
+    for (const a of acts) {
+      const wf = byId[a.workflowId];
+      if (!wf || wf.status !== 'RUNNING') continue;
+
+      if (a.status === 'RUNNING') {
+        const elapsed = now - a.startMs;
+        // ~ finish after 1.2–4s of real elapsed, weighted by chance
+        if (elapsed > 1200 && rand() < 0.5) {
+          const fail = rand() < 0.18 && a.attempt < a.maxAttempts;
+          const hardFail = rand() < 0.10 && a.attempt >= a.maxAttempts;
+          if (fail) {
+            const e = ERRORS[Math.floor(rand() * ERRORS.length)];
+            const evType = e.kind === 'timeout' ? 'ACTIVITY_TIMEOUT' : 'ACTIVITY_FAILED';
+            pushEv(wf.id, evType, { commandType: 'ACTIVITY', seq: a.seq, activityName: a.name,
+              payload: { attempt: a.attempt, error: e.msg } });
+            const backoff = Math.min(30000, 800 * Math.pow(2, a.attempt - 1));
+            pushEv(wf.id, 'ACTIVITY_RETRY_SCHEDULED', { commandType: 'ACTIVITY', seq: a.seq, activityName: a.name,
+              payload: { attempt: a.attempt, nextAttempt: a.attempt + 1, backoffMs: backoff,
+                fireAt: new Date(now + backoff).toISOString(), error: e.msg } });
+          } else if (hardFail) {
+            const e = ERRORS[Math.floor(rand() * ERRORS.length)];
+            pushEv(wf.id, 'ACTIVITY_FAILED', { commandType: 'ACTIVITY', seq: a.seq, activityName: a.name,
+              payload: { attempt: a.attempt, error: e.msg, terminal: true } });
+            wf.status = 'FAILED'; wf.error = a.name + ': ' + e.msg;
+            wf.completedAt = new Date(now).toISOString(); wf.updatedAt = wf.completedAt;
+            pushEv(wf.id, 'WORKFLOW_FAILED', { payload: { error: wf.error } });
+          } else {
+            let input = a.input || {};
+            pushEv(wf.id, 'ACTIVITY_COMPLETED', { commandType: 'ACTIVITY', seq: a.seq, activityName: a.name,
+              payload: activityOutput(a.name, input) });
+            // maybe start next activity in the workflow, or complete the wf
+            maybeAdvanceWorkflow(store, wf, a, pushEv, byId);
+          }
+        }
+      } else if (a.status === 'RETRYING') {
+        if (a.nextRetryAt && Date.parse(a.nextRetryAt) <= now) {
+          pushEv(wf.id, 'ACTIVITY_STARTED', { commandType: 'ACTIVITY', seq: a.seq, activityName: a.name,
+            payload: { attempt: a.attempt + 1, args: a.input } });
+        }
+      }
+    }
+
+    // occasionally spawn a brand-new workflow
+    if (rand() < 0.18) {
+      const { workflow, events: evs } = buildWorkflow(now, ri(200, 1500), 'RUNNING');
+      byId[workflow.id] = workflow;
+      store.workflows.unshift(workflow);
+      store.nextWf = Math.max(store.nextWf, workflow.id);
+      evs.forEach((e) => { e.id = ++store.nextEv; });
+      store.events = store.events.concat(evs);
+      changed = true;
+    }
+
+    // jitter workers
+    for (const w of store.workers) {
+      if (rand() < 0.5) { w.activeTasks = Math.max(0, Math.min(w.capacity, w.activeTasks + (rand() < 0.5 ? -1 : 1))); }
+      if (rand() < 0.6) { w.lastHeartbeat = new Date(now - ri(150, 2500)).toISOString(); changed = true; }
+    }
+    store.events.sort((a, b) => a.id - b.id);
+    return changed;
+  }
+
+  function maybeAdvanceWorkflow(store, wf, finishedAct, pushEv, byId) {
+    const now = store.now;
+    // figure out how many activities this template expects
+    const tpl = TEMPLATES.find((t) => t.type === wf.workflowType);
+    const total = tpl ? tpl.acts.length : finishedAct.seq;
+    if (finishedAct.seq >= total) {
+      const result = workflowResult(wf.workflowType, safeParse(wf.input));
+      wf.status = 'COMPLETED'; wf.result = JSON.stringify(result);
+      wf.completedAt = new Date(now).toISOString(); wf.updatedAt = wf.completedAt;
+      pushEv(wf.id, 'WORKFLOW_COMPLETED', { payload: result });
+    } else {
+      const next = tpl.acts[finishedAct.seq]; // seq is 1-based, acts 0-based -> next index = seq
+      pushEv(wf.id, 'ACTIVITY_STARTED', { commandType: 'ACTIVITY', seq: finishedAct.seq + 1,
+        activityName: next.name, payload: { attempt: 1, args: safeParse(wf.input) } });
+    }
+  }
+  function safeParse(s) { try { return JSON.parse(s); } catch (_) { return {}; } }
+
+  // ---- formatters ----
+  function fmtDuration(ms) {
+    if (ms == null) return '—';
+    if (ms < 0) ms = 0;
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + 's';
+    const totalS = Math.round(ms / 1000);
+    const m = Math.floor(totalS / 60), s = totalS % 60;
+    return m + 'm ' + s + 's';
+  }
+  function timeAgo(iso, now) {
+    const d = (now ?? Date.now()) - Date.parse(iso);
+    if (d < 1000) return 'just now';
+    if (d < 60000) return Math.floor(d / 1000) + 's ago';
+    if (d < 3600000) return Math.floor(d / 60000) + 'm ago';
+    if (d < 86400000) return Math.floor(d / 3600000) + 'h ago';
+    return Math.floor(d / 86400000) + 'd ago';
+  }
+  function fmtClock(iso) {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-GB', { hour12: false }) + '.' +
+      String(d.getMilliseconds()).padStart(3, '0');
+  }
+  function fmtDate(iso) {
+    const d = new Date(iso);
+    return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+      .replace(',', '');
+  }
+
+  // simulates a "facets" endpoint: distinct types & statuses actually present in the store
+  const STATUS_ORDER = { RUNNING: 0, PENDING: 1, COMPLETED: 2, FAILED: 3, CANCELLED: 4 };
+  function facets(store) {
+    const types = new Set(), statuses = new Set();
+    for (const w of store.workflows) { types.add(w.workflowType); statuses.add(w.status); }
+    return {
+      types: [...types].sort(),
+      statuses: [...statuses].sort((a, b) => (STATUS_ORDER[a] ?? 9) - (STATUS_ORDER[b] ?? 9)),
+    };
+  }
+
+  // ============================================================
+  //  METRICS — fold events into time-series over a window.
+  //  (No metrics endpoint exists; computed client-side, Grafana-style.)
+  // ============================================================
+  function buildMetrics(store, from, to, wfTypes, nBuckets) {
+    nBuckets = nBuckets || 48;
+    const now = store.now || Date.now();
+    // optional filter to one or more workflow types
+    let wfs = store.workflows, evs = store.events;
+    if (wfTypes && wfTypes.length) {
+      const set = new Set(wfTypes);
+      const ids = new Set(wfs.filter((w) => set.has(w.workflowType)).map((w) => w.id));
+      wfs = wfs.filter((w) => ids.has(w.id));
+      evs = evs.filter((e) => ids.has(e.workflowId));
+    }
+    let lo = from, hi = to;
+    if (!isFinite(lo)) {
+      lo = now;
+      for (const w of wfs) { const ts = Date.parse(w.createdAt); if (ts < lo) lo = ts; }
+    }
+    if (!isFinite(hi)) hi = now;
+    if (hi <= lo) hi = lo + 1;
+    const span = hi - lo, bw = span / nBuckets;
+    const bIndex = (ts) => { const i = Math.floor((ts - lo) / bw); return i < 0 || i >= nBuckets ? -1 : i; };
+    const z = () => new Array(nBuckets).fill(0);
+
+    const created = z(), started = z(), completed = z(), failed = z(), durSumB = z(), durNB = z();
+    for (const e of evs) {
+      const i = bIndex(Date.parse(e.createdAt)); if (i < 0) continue;
+      if (e.eventType === 'WORKFLOW_CREATED') created[i]++;
+      else if (e.eventType === 'ACTIVITY_STARTED') started[i]++;
+      else if (e.eventType === 'ACTIVITY_COMPLETED') completed[i]++;
+      else if (e.eventType === 'ACTIVITY_FAILED' || e.eventType === 'ACTIVITY_TIMEOUT') failed[i]++;
+    }
+
+    // gauges: build coverage intervals from activities
+    const byId = {}; wfs.forEach((w) => (byId[w.id] = w));
+    const acts = deriveActivities(evs, byId);
+    const execIv = [], schedIv = [];
+    for (const a of acts) {
+      let st = null;
+      for (const e of a.events) {
+        const ts = Date.parse(e.createdAt);
+        if (e.eventType === 'ACTIVITY_STARTED') st = ts;
+        else if (st != null && (e.eventType === 'ACTIVITY_COMPLETED' || e.eventType === 'ACTIVITY_FAILED' || e.eventType === 'ACTIVITY_TIMEOUT')) { execIv.push([st, ts]); st = null; }
+        if (e.eventType === 'ACTIVITY_RETRY_SCHEDULED') {
+          let fire = ts; try { const p = JSON.parse(e.payload || '{}'); if (p.fireAt) fire = Date.parse(p.fireAt); } catch (_) {}
+          schedIv.push([ts, fire]);
+        }
+      }
+      if (st != null) execIv.push([st, now]);
+      if (a.durationMs != null) { const i = bIndex(a.startMs); if (i >= 0) { durSumB[i] += a.durationMs; durNB[i]++; } }
+    }
+    const wfIv = wfs.map((w) => [Date.parse(w.createdAt), w.completedAt ? Date.parse(w.completedAt) : now]);
+    const countAt = (iv, T) => { let c = 0; for (let k = 0; k < iv.length; k++) if (iv[k][0] <= T && iv[k][1] > T) c++; return c; };
+
+    const executing = z(), schedule = z(), active = z(), avgDur = z(), successRate = new Array(nBuckets).fill(null);
+    for (let i = 0; i < nBuckets; i++) {
+      const T = lo + (i + 1) * bw;
+      executing[i] = countAt(execIv, T);
+      schedule[i] = countAt(schedIv, T);
+      active[i] = countAt(wfIv, T);
+      avgDur[i] = durNB[i] ? durSumB[i] / durNB[i] : 0;
+      const tot = completed[i] + failed[i];
+      successRate[i] = tot ? Math.round((completed[i] / tot) * 100) : null;
+    }
+    const queue = executing.map((ex, i) => Math.max(0, active[i] - ex));
+
+    // current snapshot at "now"
+    let durSum = 0, durN = 0, compTot = 0, failTot = 0, createdSum = 0;
+    for (let i = 0; i < nBuckets; i++) { createdSum += created[i]; }
+    for (const a of acts) {
+      if (a.startMs >= lo && a.startMs <= hi) {
+        if (a.durationMs != null) { durSum += a.durationMs; durN++; }
+        if (a.status === 'COMPLETED') compTot++;
+        else if (a.status === 'FAILED' || a.status === 'TIMED_OUT') failTot++;
+      }
+    }
+    const cur = {
+      created: createdSum,
+      executing: countAt(execIv, now),
+      schedule: countAt(schedIv, now),
+      queue: Math.max(0, countAt(wfIv, now) - countAt(execIv, now)),
+      avgDurationMs: durN ? durSum / durN : 0,
+      successPct: (compTot + failTot) ? Math.round((compTot / (compTot + failTot)) * 100) : 100,
+      started: started.reduce((s, v) => s + v, 0),
+      completed: compTot, failed: failTot,
+    };
+    return { lo, hi, bw, nBuckets, created, started, completed, failed, executing, queue, schedule, successRate, avgDur, cur };
+  }
+
+  window.TLData = {
+    createStore, tickSimulation, deriveActivities, buildMetrics,
+    fmtDuration, timeAgo, fmtClock, fmtDate, facets, TASK_QUEUES,
+    ACTIVITY_STATUSES: ['RUNNING', 'RETRYING', 'COMPLETED', 'FAILED', 'TIMED_OUT'],
+    WF_STATUSES: ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'],
+  };
+})();
+
+  </script>
+  <script>
+/* temporal-lite — real backend adapter.
+ * Overrides the mock data source with live REST calls to the workflow engine. The pure helpers
+ * defined above (formatters, deriveActivities, facets, *_STATUSES) are kept as-is; only the data
+ * SOURCE is swapped. Endpoints: GET /workflow/api/workflows, /workers, /metrics, /workflows/:id/events.
+ */
+(function () {
+  const TL = window.TLData;
+  const API = '/workflow/api';
+
+  function emptyMetrics() {
+    const n = 48, z = () => new Array(n).fill(0), now = Date.now();
+    return { lo: now - 86400e3, hi: now, bw: 86400e3 / n, nBuckets: n,
+      created: z(), started: z(), completed: z(), failed: z(),
+      running: z(), executing: z(), queue: z(), schedule: z(),
+      successRate: new Array(n).fill(null), avgDur: z(),
+      cur: { created: 0, executing: 0, schedule: 0, queue: 0, running: 0,
+             avgDurationMs: 0, successPct: 100, started: 0, completed: 0, failed: 0 } };
+  }
+
+  async function getJSON(path) {
+    const res = await fetch(API + path, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+    return res.json();
+  }
+
+  // Refresh workflows + workers + metrics into the (stable) store object held by <App/>.
+  // Arrays are REPLACED (new references) so React useMemo deps actually change.
+  async function refresh(store) {
+    try {
+      const [wfs, workers, metrics] = await Promise.all([
+        getJSON('/workflows?limit=500'),
+        getJSON('/workers').catch(() => store.workers),
+        getJSON('/metrics?buckets=48').catch(() => store.__metrics),
+      ]);
+      store.workflows = Array.isArray(wfs) ? wfs : [];
+      store.workers = Array.isArray(workers) ? workers : (store.workers || []);
+      store.__metrics = metrics || store.__metrics;
+      store.now = Date.now();
+      store.__changed = true;
+    } catch (e) {
+      console.error('workflow-ui: refresh failed', e);
+    }
+  }
+
+  TL.createStore = function () {
+    const store = { now: Date.now(), workflows: [], events: [], workers: [],
+                    __metrics: emptyMetrics(), __changed: false };
+    refresh(store);
+    return store;
+  };
+
+  // Called each poll: kick a background refresh, report whether the PREVIOUS one landed new data.
+  TL.tickSimulation = function (store) {
+    refresh(store);
+    const changed = store.__changed;
+    store.__changed = false;
+    return changed;
+  };
+
+  // Metrics are computed server-side and persisted to wflow.metrics_snapshot; return the cache.
+  TL.buildMetrics = function (store) {
+    return store.__metrics || emptyMetrics();
+  };
+
+  // Per-workflow event history, fetched on demand when a workflow modal opens.
+  TL.fetchEvents = function (wfId) {
+    return getJSON('/workflows/' + wfId + '/events')
+      .then((evs) => Array.isArray(evs) ? evs.slice().sort((a, b) => a.id - b.id) : [])
+      .catch(() => []);
+  };
+})();
+  </script>
+<script type="text/babel" data-src="tweaks-panel.jsx">
+
+/* BEGIN USAGE */
+// tweaks-panel.jsx
+// Reusable Tweaks shell + form-control helpers.
+// Exports (to window): useTweaks, TweaksPanel, TweakSection, TweakRow, TweakSlider,
+//   TweakToggle, TweakRadio, TweakSelect, TweakText, TweakNumber, TweakColor, TweakButton.
+//
+// Owns the host protocol (listens for __activate_edit_mode / __deactivate_edit_mode,
+// posts __edit_mode_available / __edit_mode_set_keys / __edit_mode_dismissed) so
+// individual prototypes don't re-roll it. Ships a consistent set of controls so you
+// don't hand-draw <input type="range">, segmented radios, steppers, etc.
+//
+// Usage (in an HTML file that loads React + Babel):
+//
+//   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+//     "primaryColor": "#D97757",
+//     "palette": ["#D97757", "#29261b", "#f6f4ef"],
+//     "fontSize": 16,
+//     "density": "regular",
+//     "dark": false
+//   }/*EDITMODE-END*/;
+//
+//   function App() {
+//     const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+//     return (
+//       <div style={{ fontSize: t.fontSize, color: t.primaryColor }}>
+//         Hello
+//         <TweaksPanel>
+//           <TweakSection label="Typography" />
+//           <TweakSlider label="Font size" value={t.fontSize} min={10} max={32} unit="px"
+//                        onChange={(v) => setTweak('fontSize', v)} />
+//           <TweakRadio  label="Density" value={t.density}
+//                        options={['compact', 'regular', 'comfy']}
+//                        onChange={(v) => setTweak('density', v)} />
+//           <TweakSection label="Theme" />
+//           <TweakColor  label="Primary" value={t.primaryColor}
+//                        options={['#D97757', '#2A6FDB', '#1F8A5B', '#7A5AE0']}
+//                        onChange={(v) => setTweak('primaryColor', v)} />
+//           <TweakColor  label="Palette" value={t.palette}
+//                        options={[['#D97757', '#29261b', '#f6f4ef'],
+//                                  ['#475569', '#0f172a', '#f1f5f9']]}
+//                        onChange={(v) => setTweak('palette', v)} />
+//           <TweakToggle label="Dark mode" value={t.dark}
+//                        onChange={(v) => setTweak('dark', v)} />
+//         </TweaksPanel>
+//       </div>
+//     );
+//   }
+//
+// TweakRadio is the segmented control for 2–3 short options (auto-falls-back to
+// TweakSelect past ~16/~10 chars per label); reach for TweakSelect directly when
+// options are many or long. For color tweaks always curate 3-4 options rather than
+// a free picker; an option can also be a whole 2–5 color palette (the stored value
+// is the array). The Tweak* controls are a floor, not a ceiling — build custom
+// controls inside the panel if a tweak calls for UI they don't cover.
+/* END USAGE */
+// ─────────────────────────────────────────────────────────────────────────────
+
+const __TWEAKS_STYLE = `
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:280px;
+    max-height:calc(100vh - 32px);display:flex;flex-direction:column;
+    transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
+    background:rgba(250,249,247,.78);color:#29261b;
+    -webkit-backdrop-filter:blur(24px) saturate(160%);backdrop-filter:blur(24px) saturate(160%);
+    border:.5px solid rgba(255,255,255,.6);border-radius:14px;
+    box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 12px 40px rgba(0,0,0,.18);
+    font:11.5px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;overflow:hidden}
+  .twk-hd{display:flex;align-items:center;justify-content:space-between;
+    padding:10px 8px 10px 14px;cursor:move;user-select:none}
+  .twk-hd b{font-size:12px;font-weight:600;letter-spacing:.01em}
+  .twk-x{appearance:none;border:0;background:transparent;color:rgba(41,38,27,.55);
+    width:22px;height:22px;border-radius:6px;cursor:default;font-size:13px;line-height:1}
+  .twk-x:hover{background:rgba(0,0,0,.06);color:#29261b}
+  .twk-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:10px;
+    overflow-y:auto;overflow-x:hidden;min-height:0;
+    scrollbar-width:thin;scrollbar-color:rgba(0,0,0,.15) transparent}
+  .twk-body::-webkit-scrollbar{width:8px}
+  .twk-body::-webkit-scrollbar-track{background:transparent;margin:2px}
+  .twk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:4px;
+    border:2px solid transparent;background-clip:content-box}
+  .twk-body::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.25);
+    border:2px solid transparent;background-clip:content-box}
+  .twk-row{display:flex;flex-direction:column;gap:5px}
+  .twk-row-h{flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
+  .twk-lbl{display:flex;justify-content:space-between;align-items:baseline;
+    color:rgba(41,38,27,.72)}
+  .twk-lbl>span:first-child{font-weight:500}
+  .twk-val{color:rgba(41,38,27,.5);font-variant-numeric:tabular-nums}
+
+  .twk-sect{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    color:rgba(41,38,27,.45);padding:10px 0 0}
+  .twk-sect:first-child{padding-top:0}
+
+  .twk-field{appearance:none;box-sizing:border-box;width:100%;min-width:0;height:26px;padding:0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;
+    background:rgba(255,255,255,.6);color:inherit;font:inherit;outline:none}
+  .twk-field:focus{border-color:rgba(0,0,0,.25);background:rgba(255,255,255,.85)}
+  select.twk-field{padding-right:22px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(0,0,0,.5)' d='M0 0h10L5 6z'/></svg>");
+    background-repeat:no-repeat;background-position:right 8px center}
+
+  .twk-slider{appearance:none;-webkit-appearance:none;width:100%;height:4px;margin:6px 0;
+    border-radius:999px;background:rgba(0,0,0,.12);outline:none}
+  .twk-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+    width:14px;height:14px;border-radius:50%;background:#fff;
+    border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+  .twk-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+    background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+
+  .twk-seg{position:relative;display:flex;padding:2px;border-radius:8px;
+    background:rgba(0,0,0,.06);user-select:none}
+  .twk-seg-thumb{position:absolute;top:2px;bottom:2px;border-radius:6px;
+    background:rgba(255,255,255,.9);box-shadow:0 1px 2px rgba(0,0,0,.12);
+    transition:left .15s cubic-bezier(.3,.7,.4,1),width .15s}
+  .twk-seg.dragging .twk-seg-thumb{transition:none}
+  .twk-seg button{appearance:none;position:relative;z-index:1;flex:1;border:0;
+    background:transparent;color:inherit;font:inherit;font-weight:500;min-height:22px;
+    border-radius:6px;cursor:default;padding:4px 6px;line-height:1.2;
+    overflow-wrap:anywhere}
+
+  .twk-toggle{position:relative;width:32px;height:18px;border:0;border-radius:999px;
+    background:rgba(0,0,0,.15);transition:background .15s;cursor:default;padding:0}
+  .twk-toggle[data-on="1"]{background:#34c759}
+  .twk-toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
+  .twk-toggle[data-on="1"] i{transform:translateX(14px)}
+
+  .twk-num{display:flex;align-items:center;box-sizing:border-box;min-width:0;height:26px;padding:0 0 0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;background:rgba(255,255,255,.6)}
+  .twk-num-lbl{font-weight:500;color:rgba(41,38,27,.6);cursor:ew-resize;
+    user-select:none;padding-right:8px}
+  .twk-num input{flex:1;min-width:0;height:100%;border:0;background:transparent;
+    font:inherit;font-variant-numeric:tabular-nums;text-align:right;padding:0 8px 0 0;
+    outline:none;color:inherit;-moz-appearance:textfield}
+  .twk-num input::-webkit-inner-spin-button,.twk-num input::-webkit-outer-spin-button{
+    -webkit-appearance:none;margin:0}
+  .twk-num-unit{padding-right:8px;color:rgba(41,38,27,.45)}
+
+  .twk-btn{appearance:none;height:26px;padding:0 12px;border:0;border-radius:7px;
+    background:rgba(0,0,0,.78);color:#fff;font:inherit;font-weight:500;cursor:default}
+  .twk-btn:hover{background:rgba(0,0,0,.88)}
+  .twk-btn.secondary{background:rgba(0,0,0,.06);color:inherit}
+  .twk-btn.secondary:hover{background:rgba(0,0,0,.1)}
+
+  .twk-swatch{appearance:none;-webkit-appearance:none;width:56px;height:22px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:6px;padding:0;cursor:default;
+    background:transparent;flex-shrink:0}
+  .twk-swatch::-webkit-color-swatch-wrapper{padding:0}
+  .twk-swatch::-webkit-color-swatch{border:0;border-radius:5.5px}
+  .twk-swatch::-moz-color-swatch{border:0;border-radius:5.5px}
+
+  .twk-chips{display:flex;gap:6px}
+  .twk-chip{position:relative;appearance:none;flex:1;min-width:0;height:46px;
+    padding:0;border:0;border-radius:6px;overflow:hidden;cursor:default;
+    box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.06);
+    transition:transform .12s cubic-bezier(.3,.7,.4,1),box-shadow .12s}
+  .twk-chip:hover{transform:translateY(-1px);
+    box-shadow:0 0 0 .5px rgba(0,0,0,.18),0 4px 10px rgba(0,0,0,.12)}
+  .twk-chip[data-on="1"]{box-shadow:0 0 0 1.5px rgba(0,0,0,.85),
+    0 2px 6px rgba(0,0,0,.15)}
+  .twk-chip>span{position:absolute;top:0;bottom:0;right:0;width:34%;
+    display:flex;flex-direction:column;box-shadow:-1px 0 0 rgba(0,0,0,.1)}
+  .twk-chip>span>i{flex:1;box-shadow:0 -1px 0 rgba(0,0,0,.1)}
+  .twk-chip>span>i:first-child{box-shadow:none}
+  .twk-chip svg{position:absolute;top:6px;left:6px;width:13px;height:13px;
+    filter:drop-shadow(0 1px 1px rgba(0,0,0,.3))}
+`;
+
+// ── useTweaks ───────────────────────────────────────────────────────────────
+// Single source of truth for tweak values. setTweak persists via the host
+// (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
+function useTweaks(defaults) {
+  const [values, setValues] = React.useState(defaults);
+  // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
+  // useState-style call doesn't write a "[object Object]" key into the persisted
+  // JSON block.
+  const setTweak = React.useCallback((keyOrEdits, val) => {
+    const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
+      ? keyOrEdits : { [keyOrEdits]: val };
+    setValues((prev) => ({ ...prev, ...edits }));
+    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
+    // Same-window signal so in-page listeners (deck-stage rail thumbnails)
+    // can react — the parent message only reaches the host, not peers.
+    window.dispatchEvent(new CustomEvent('tweakchange', { detail: edits }));
+  }, []);
+  return [values, setTweak];
+}
+
+// ── TweaksPanel ─────────────────────────────────────────────────────────────
+// Floating shell. Registers the protocol listener BEFORE announcing
+// availability — if the announce ran first, the host's activate could land
+// before our handler exists and the toolbar toggle would silently no-op.
+// The close button posts __edit_mode_dismissed so the host's toolbar toggle
+// flips off in lockstep; the host echoes __deactivate_edit_mode back which
+// is what actually hides the panel.
+function TweaksPanel({ title = 'Tweaks', children }) {
+  const [open, setOpen] = React.useState(false);
+  const dragRef = React.useRef(null);
+  const offsetRef = React.useRef({ x: 16, y: 16 });
+  const PAD = 16;
+
+  const clampToViewport = React.useCallback(() => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const w = panel.offsetWidth, h = panel.offsetHeight;
+    const maxRight = Math.max(PAD, window.innerWidth - w - PAD);
+    const maxBottom = Math.max(PAD, window.innerHeight - h - PAD);
+    offsetRef.current = {
+      x: Math.min(maxRight, Math.max(PAD, offsetRef.current.x)),
+      y: Math.min(maxBottom, Math.max(PAD, offsetRef.current.y)),
+    };
+    panel.style.right = offsetRef.current.x + 'px';
+    panel.style.bottom = offsetRef.current.y + 'px';
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    clampToViewport();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', clampToViewport);
+      return () => window.removeEventListener('resize', clampToViewport);
+    }
+    const ro = new ResizeObserver(clampToViewport);
+    ro.observe(document.documentElement);
+    return () => ro.disconnect();
+  }, [open, clampToViewport]);
+
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      const t = e?.data?.type;
+      if (t === '__activate_edit_mode') setOpen(true);
+      else if (t === '__deactivate_edit_mode') setOpen(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const dismiss = () => {
+    setOpen(false);
+    window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*');
+  };
+
+  const onDragStart = (e) => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const r = panel.getBoundingClientRect();
+    const sx = e.clientX, sy = e.clientY;
+    const startRight = window.innerWidth - r.right;
+    const startBottom = window.innerHeight - r.bottom;
+    const move = (ev) => {
+      offsetRef.current = {
+        x: startRight - (ev.clientX - sx),
+        y: startBottom - (ev.clientY - sy),
+      };
+      clampToViewport();
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  if (!open) return null;
+  return (
+    <>
+      <style>{__TWEAKS_STYLE}</style>
+      <div ref={dragRef} className="twk-panel" data-omelette-chrome=""
+           style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
+        <div className="twk-hd" onMouseDown={onDragStart}>
+          <b>{title}</b>
+          <button className="twk-x" aria-label="Close tweaks"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={dismiss}>✕</button>
+        </div>
+        <div className="twk-body">
+          {children}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Layout helpers ──────────────────────────────────────────────────────────
+
+function TweakSection({ label, children }) {
+  return (
+    <>
+      <div className="twk-sect">{label}</div>
+      {children}
+    </>
+  );
+}
+
+function TweakRow({ label, value, children, inline = false }) {
+  return (
+    <div className={inline ? 'twk-row twk-row-h' : 'twk-row'}>
+      <div className="twk-lbl">
+        <span>{label}</span>
+        {value != null && <span className="twk-val">{value}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ── Controls ────────────────────────────────────────────────────────────────
+
+function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
+  return (
+    <TweakRow label={label} value={`${value}${unit}`}>
+      <input type="range" className="twk-slider" min={min} max={max} step={step}
+             value={value} onChange={(e) => onChange(Number(e.target.value))} />
+    </TweakRow>
+  );
+}
+
+function TweakToggle({ label, value, onChange }) {
+  return (
+    <div className="twk-row twk-row-h">
+      <div className="twk-lbl"><span>{label}</span></div>
+      <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
+              role="switch" aria-checked={!!value}
+              onClick={() => onChange(!value)}><i /></button>
+    </div>
+  );
+}
+
+function TweakRadio({ label, value, options, onChange }) {
+  const trackRef = React.useRef(null);
+  const [dragging, setDragging] = React.useState(false);
+  // The active value is read by pointer-move handlers attached for the lifetime
+  // of a drag — ref it so a stale closure doesn't fire onChange for every move.
+  const valueRef = React.useRef(value);
+  valueRef.current = value;
+
+  // Segments wrap mid-word once per-segment width runs out. The track is
+  // ~248px (280 panel − 28 body pad − 4 seg pad), each button loses 12px
+  // to its own padding, and 11.5px system-ui averages ~6.3px/char — so 2
+  // options fit ~16 chars each, 3 fit ~10. Past that (or >3 options), fall
+  // back to a dropdown rather than wrap.
+  const labelLen = (o) => String(typeof o === 'object' ? o.label : o).length;
+  const maxLen = options.reduce((m, o) => Math.max(m, labelLen(o)), 0);
+  const fitsAsSegments = maxLen <= ({ 2: 16, 3: 10 }[options.length] ?? 0);
+  if (!fitsAsSegments) {
+    // <select> emits strings — map back to the original option value so the
+    // fallback stays type-preserving (numbers, booleans) like the segment path.
+    const resolve = (s) => {
+      const m = options.find((o) => String(typeof o === 'object' ? o.value : o) === s);
+      return m === undefined ? s : typeof m === 'object' ? m.value : m;
+    };
+    return <TweakSelect label={label} value={value} options={options}
+                        onChange={(s) => onChange(resolve(s))} />;
+  }
+  const opts = options.map((o) => (typeof o === 'object' ? o : { value: o, label: o }));
+  const idx = Math.max(0, opts.findIndex((o) => o.value === value));
+  const n = opts.length;
+
+  const segAt = (clientX) => {
+    const r = trackRef.current.getBoundingClientRect();
+    const inner = r.width - 4;
+    const i = Math.floor(((clientX - r.left - 2) / inner) * n);
+    return opts[Math.max(0, Math.min(n - 1, i))].value;
+  };
+
+  const onPointerDown = (e) => {
+    setDragging(true);
+    const v0 = segAt(e.clientX);
+    if (v0 !== valueRef.current) onChange(v0);
+    const move = (ev) => {
+      if (!trackRef.current) return;
+      const v = segAt(ev.clientX);
+      if (v !== valueRef.current) onChange(v);
+    };
+    const up = () => {
+      setDragging(false);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  return (
+    <TweakRow label={label}>
+      <div ref={trackRef} role="radiogroup" onPointerDown={onPointerDown}
+           className={dragging ? 'twk-seg dragging' : 'twk-seg'}>
+        <div className="twk-seg-thumb"
+             style={{ left: `calc(2px + ${idx} * (100% - 4px) / ${n})`,
+                      width: `calc((100% - 4px) / ${n})` }} />
+        {opts.map((o) => (
+          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </TweakRow>
+  );
+}
+
+function TweakSelect({ label, value, options, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <select className="twk-field" value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((o) => {
+          const v = typeof o === 'object' ? o.value : o;
+          const l = typeof o === 'object' ? o.label : o;
+          return <option key={v} value={v}>{l}</option>;
+        })}
+      </select>
+    </TweakRow>
+  );
+}
+
+function TweakText({ label, value, placeholder, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <input className="twk-field" type="text" value={value} placeholder={placeholder}
+             onChange={(e) => onChange(e.target.value)} />
+    </TweakRow>
+  );
+}
+
+function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) {
+  const clamp = (n) => {
+    if (min != null && n < min) return min;
+    if (max != null && n > max) return max;
+    return n;
+  };
+  const startRef = React.useRef({ x: 0, val: 0 });
+  const onScrubStart = (e) => {
+    e.preventDefault();
+    startRef.current = { x: e.clientX, val: value };
+    const decimals = (String(step).split('.')[1] || '').length;
+    const move = (ev) => {
+      const dx = ev.clientX - startRef.current.x;
+      const raw = startRef.current.val + dx * step;
+      const snapped = Math.round(raw / step) * step;
+      onChange(clamp(Number(snapped.toFixed(decimals))));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  return (
+    <div className="twk-num">
+      <span className="twk-num-lbl" onPointerDown={onScrubStart}>{label}</span>
+      <input type="number" value={value} min={min} max={max} step={step}
+             onChange={(e) => onChange(clamp(Number(e.target.value)))} />
+      {unit && <span className="twk-num-unit">{unit}</span>}
+    </div>
+  );
+}
+
+// Relative-luminance contrast pick — checkmarks drawn over a swatch need to
+// read on both #111 and #fafafa without per-option configuration. Hex input
+// only (#rgb / #rrggbb); named or rgb()/hsl() colors fall through to "light".
+function __twkIsLight(hex) {
+  const h = String(hex).replace('#', '');
+  const x = h.length === 3 ? h.replace(/./g, (c) => c + c) : h.padEnd(6, '0');
+  const n = parseInt(x.slice(0, 6), 16);
+  if (Number.isNaN(n)) return true;
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return r * 299 + g * 587 + b * 114 > 148000;
+}
+
+const __TwkCheck = ({ light }) => (
+  <svg viewBox="0 0 14 14" aria-hidden="true">
+    <path d="M3 7.2 5.8 10 11 4.2" fill="none" strokeWidth="2.2"
+          strokeLinecap="round" strokeLinejoin="round"
+          stroke={light ? 'rgba(0,0,0,.78)' : '#fff'} />
+  </svg>
+);
+
+// TweakColor — curated color/palette picker. Each option is either a single
+// hex string or an array of 1-5 hex strings; the card adapts — a lone color
+// renders solid, a palette renders colors[0] as the hero (left ~2/3) with the
+// rest stacked in a sharp column on the right. onChange emits the
+// option in the shape it was passed (string stays string, array stays array).
+// Without options it falls back to the native color input for back-compat.
+function TweakColor({ label, value, options, onChange }) {
+  if (!options || !options.length) {
+    return (
+      <div className="twk-row twk-row-h">
+        <div className="twk-lbl"><span>{label}</span></div>
+        <input type="color" className="twk-swatch" value={value}
+               onChange={(e) => onChange(e.target.value)} />
+      </div>
+    );
+  }
+  // Native <input type=color> emits lowercase hex per the HTML spec, so
+  // compare case-insensitively. String() guards JSON.stringify(undefined),
+  // which returns the primitive undefined (no .toLowerCase).
+  const key = (o) => String(JSON.stringify(o)).toLowerCase();
+  const cur = key(value);
+  return (
+    <TweakRow label={label}>
+      <div className="twk-chips" role="radiogroup">
+        {options.map((o, i) => {
+          const colors = Array.isArray(o) ? o : [o];
+          const [hero, ...rest] = colors;
+          const sup = rest.slice(0, 4);
+          const on = key(o) === cur;
+          return (
+            <button key={i} type="button" className="twk-chip" role="radio"
+                    aria-checked={on} data-on={on ? '1' : '0'}
+                    aria-label={colors.join(', ')} title={colors.join(' · ')}
+                    style={{ background: hero }}
+                    onClick={() => onChange(o)}>
+              {sup.length > 0 && (
+                <span>
+                  {sup.map((c, j) => <i key={j} style={{ background: c }} />)}
+                </span>
+              )}
+              {on && <__TwkCheck light={__twkIsLight(hero)} />}
+            </button>
+          );
+        })}
+      </div>
+    </TweakRow>
+  );
+}
+
+function TweakButton({ label, onClick, secondary = false }) {
+  return (
+    <button type="button" className={secondary ? 'twk-btn secondary' : 'twk-btn'}
+            onClick={onClick}>{label}</button>
+  );
+}
+
+Object.assign(window, {
+  useTweaks, TweaksPanel, TweakSection, TweakRow,
+  TweakSlider, TweakToggle, TweakRadio, TweakSelect,
+  TweakText, TweakNumber, TweakColor, TweakButton,
+});
+
+</script>
+<script type="text/babel" data-src="components.jsx">
+/* temporal-lite — shared primitives */
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ---- inline icons (stroke, 24 viewBox) ----
+const Icon = ({ d, fill, size, style }) => (
+  <svg className="ic" viewBox="0 0 24 24" width={size} height={size} fill={fill ? 'currentColor' : 'none'}
+    stroke={fill ? 'none' : 'currentColor'} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
+    style={style}>
+    {Array.isArray(d) ? d.map((p, i) => <path key={i} d={p} />) : <path d={d} />}
+  </svg>
+);
+const ICONS = {
+  activity: 'M22 12h-4l-3 9L9 3l-3 9H2',
+  workflow: ['M5 3a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z', 'M14 7h6', 'M14 12h6', 'M5 14a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2z', 'M14 16h6', 'M14 21h6'],
+  worker: ['M2 14h20', 'M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z', 'M7 18v2', 'M17 18v2'],
+  chart: ['M3 3v18h18', 'M7 14l3-4 3 3 4-6'],
+  search: ['M11 11m-7 0a7 7 0 1 0 14 0a7 7 0 1 0-14 0', 'M21 21l-4.3-4.3'],
+  x: 'M18 6 6 18M6 6l12 12',
+  filter: 'M22 3H2l8 9.46V19l4 2v-8.54z',
+  refresh: ['M21 12a9 9 0 1 1-3-6.7L21 8', 'M21 3v5h-5'],
+  retry: ['M3 12a9 9 0 1 0 3-6.7L3 8', 'M3 3v5h5'],
+  alert: ['M12 9v4', 'M12 17h.01', 'M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z'],
+  clock: ['M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0', 'M12 7v5l3 2'],
+  zap: 'M13 2 3 14h7l-1 8 10-12h-7z',
+  copy: ['M9 9h11a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z', 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'],
+  chevron: 'M9 18l6-6-6-6',
+  check: 'M20 6 9 17l-5-5',
+  dot: 'M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0',
+};
+const Ic = ({ name, size, fill, style }) => <Icon d={ICONS[name]} fill={fill} size={size} style={style} />;
+
+// ---- status color map ----
+const STATUS_COLOR = {
+  RUNNING: 'var(--st-running)', RETRYING: 'var(--st-retrying)', COMPLETED: 'var(--st-completed)',
+  FAILED: 'var(--st-failed)', TIMED_OUT: 'var(--st-timeout)', PENDING: 'var(--st-pending)',
+  CANCELLED: 'var(--st-cancelled)',
+  // workflow + event aliases
+  WORKFLOW_CREATED: 'var(--st-pending)', WORKFLOW_TASK_QUEUED: 'var(--st-pending)',
+  WORKFLOW_TASK_STARTED: 'var(--st-running)', WORKFLOW_TASK_COMPLETED: 'var(--st-running)',
+  WORKFLOW_TASK_FAILED: 'var(--st-failed)', WORKFLOW_COMPLETED: 'var(--st-completed)',
+  WORKFLOW_FAILED: 'var(--st-failed)',
+  ACTIVITY_STARTED: 'var(--st-running)', ACTIVITY_COMPLETED: 'var(--st-completed)',
+  ACTIVITY_FAILED: 'var(--st-failed)', ACTIVITY_TIMEOUT: 'var(--st-timeout)',
+  ACTIVITY_RETRY_SCHEDULED: 'var(--st-retrying)', SIDE_EFFECT_RECORDED: 'var(--st-cancelled)',
+  VERSION_MARKER: 'var(--st-cancelled)',
+};
+const statusLabel = (s) => ({ TIMED_OUT: 'TIMEOUT' }[s] || s);
+const isLive = (s) => s === 'RUNNING' || s === 'RETRYING';
+
+function StatusBadge({ status }) {
+  const c = STATUS_COLOR[status] || 'var(--st-pending)';
+  return (
+    <span className={'sb' + (isLive(status) ? ' spin' : '')} style={{ '--c': c }}>
+      <span className="d"></span>{statusLabel(status)}
+    </span>
+  );
+}
+
+// ---- JSON syntax highlighter (string -> colored HTML) ----
+function highlightJson(value) {
+  let obj = value;
+  if (typeof value === 'string') { try { obj = JSON.parse(value); } catch (_) { return esc(value); } }
+  const json = JSON.stringify(obj, null, 2);
+  return json.replace(/("(\\.|[^"\\])*"(\s*:)?|\b(true|false)\b|\bnull\b|-?\d+(\.\d+)?([eE][+-]?\d+)?)/g, (m) => {
+    let cls = 'n';
+    if (/^"/.test(m)) cls = /:$/.test(m) ? 'k' : 's';
+    else if (/true|false/.test(m)) cls = 'b';
+    else if (/null/.test(m)) cls = 'null';
+    return '<span class="' + cls + '">' + esc(m) + '</span>';
+  });
+}
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+function JsonView({ data }) {
+  if (data == null || data === 'null') return <div className="json null">null</div>;
+  return <pre className="json" dangerouslySetInnerHTML={{ __html: highlightJson(data) }} />;
+}
+
+// ---- duration bar (relative to a scale) ----
+function DurationBar({ ms, scale, color }) {
+  if (ms == null) return <span className="dim mono">running…</span>;
+  const pct = Math.max(4, Math.min(100, (ms / scale) * 100));
+  return (
+    <span className="dur-bar">
+      <span style={{ color: 'var(--text)' }}>{window.TLData.fmtDuration(ms)}</span>
+      <span className="track"><span className="fill" style={{ width: pct + '%', background: color }} /></span>
+    </span>
+  );
+}
+
+// ---- live duration that ticks while running ----
+function LiveDuration({ startMs, now }) {
+  const ms = Math.max(0, now - startMs);
+  return <span className="mono" style={{ color: 'var(--st-running)' }}>{window.TLData.fmtDuration(ms)}</span>;
+}
+
+Object.assign(window, {
+  Icon, Ic, ICONS, StatusBadge, JsonView, DurationBar, LiveDuration,
+  STATUS_COLOR, statusLabel, isLive, highlightJson,
+});
+
+</script>
+<script type="text/babel" data-src="filters.jsx">
+/* temporal-lite — filter controls: dropdown shell, multi-select, date range */
+const { useState: useStateF, useEffect: useEffectF, useRef: useRefF } = React;
+
+function FilterDropdown({ label, summary, active, width, align, children }) {
+  const [open, setOpen] = useStateF(false);
+  const ref = useRefF(null);
+  useEffectF(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  return (
+    <div className="dd" ref={ref}>
+      <button className={'dd-trigger' + (active ? ' active' : '') + (open ? ' open' : '')} onClick={() => setOpen((o) => !o)}>
+        <span className="dd-label">{label}</span>
+        <span className="dd-summary">{summary}</span>
+        <span className="dd-caret">▾</span>
+      </button>
+      {open && <div className={'dd-panel' + (align === 'right' ? ' right' : '')} style={{ width }}>{children}</div>}
+    </div>
+  );
+}
+
+function MultiSelect({ label, options, selected, onChange, dotColors }) {
+  const summary = selected.length === 0 ? 'All'
+    : selected.length === 1 ? selected[0]
+    : selected.length + ' selected';
+  const toggle = (o) => onChange(selected.includes(o) ? selected.filter((x) => x !== o) : [...selected, o]);
+  return (
+    <FilterDropdown label={label} summary={summary} active={selected.length > 0} width={248}>
+      <div className="dd-head">
+        <span>{label}</span>
+        {selected.length > 0 && <button className="dd-clear" onClick={() => onChange([])}>clear</button>}
+      </div>
+      <div className="dd-opts">
+        {options.length === 0 && <div className="dd-empty">no values</div>}
+        {options.map((o) => {
+          const on = selected.includes(o);
+          return (
+            <button key={o} className={'dd-opt' + (on ? ' on' : '')} onClick={() => toggle(o)}>
+              <span className={'dd-check' + (on ? ' on' : '')}>{on && <Ic name="check" size={11} />}</span>
+              {dotColors && <span className="dd-dot" style={{ background: dotColors(o) }} />}
+              <span className="dd-optl">{o}</span>
+            </button>
+          );
+        })}
+      </div>
+    </FilterDropdown>
+  );
+}
+
+const DR_PRESETS = [['1h', 'Last hour'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['all', 'All time'], ['custom', 'Custom range']];
+function toLocalInputF(ms) {
+  const d = new Date(ms), p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function drShort(s) {
+  if (!s) return '…';
+  const d = new Date(s); const p = (n) => String(n).padStart(2, '0');
+  return p(d.getDate()) + ' ' + d.toLocaleString('en-GB', { month: 'short' }) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function DateRangePicker({ preset, from, to, onPreset, setFrom, setTo, now }) {
+  const labelFor = { '1h': 'Last hour', '24h': 'Last 24 hours', '7d': 'Last 7 days', 'all': 'All time', 'custom': 'Custom' };
+  const summary = preset === 'custom' ? drShort(from) + ' → ' + drShort(to) : labelFor[preset];
+  const pick = (k) => {
+    if (k === 'custom') {
+      if (!from) setFrom(toLocalInputF(now - 86400e3));
+      if (!to) setTo(toLocalInputF(now));
+    }
+    onPreset(k);
+  };
+  return (
+    <FilterDropdown label="time" summary={summary} active={preset !== 'all'} width={preset === 'custom' ? 280 : 200} align="right">
+      <div className="dd-opts">
+        {DR_PRESETS.map(([k, l]) => (
+          <button key={k} className={'dd-opt' + (preset === k ? ' on' : '')} onClick={() => pick(k)}>
+            <span className={'dd-check' + (preset === k ? ' on' : '')}>{preset === k && <Ic name="check" size={11} />}</span>
+            <span className="dd-optl">{l}</span>
+          </button>
+        ))}
+      </div>
+      {preset === 'custom' && (
+        <div className="dd-custom">
+          <label className="dr-field"><span>From</span>
+            <input type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+          <label className="dr-field"><span>To</span>
+            <input type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+        </div>
+      )}
+    </FilterDropdown>
+  );
+}
+
+Object.assign(window, { FilterDropdown, MultiSelect, DateRangePicker });
+
+</script>
+<script type="text/babel" data-src="workflow-modal.jsx">
+/* temporal-lite — Workflow detail modal (fields + Timeline / Events tabs) */
+const { useState: useStateM, useMemo: useMemoM } = React;
+
+function WorkflowModal({ workflow, events, now, onClose }) {
+  const [tab, setTab] = useStateM('timeline');
+  const w = workflow;
+  const TL = window.TLData;
+  const fmtDur = TL.fmtDuration, fmtClock = TL.fmtClock, timeAgo = TL.timeAgo;
+
+  const activities = useMemoM(
+    () => TL.deriveActivities(events, { [w.id]: w }).sort((a, b) => a.seq - b.seq),
+    [events, w]
+  );
+
+  const wfStatus = mapWfStatus(w.status);
+  const t0 = Date.parse(w.createdAt);
+  const t1 = w.completedAt ? Date.parse(w.completedAt) : now;
+  const dur = t1 - t0;
+
+  // keyboard close
+  React.useEffect(() => {
+    const h = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  return (
+    <div className="wfm-overlay" onClick={onClose}>
+      <div className="wfm" onClick={(e) => e.stopPropagation()}>
+        {/* header */}
+        <div className="wfm-head">
+          <div className="wfm-titlerow">
+            <StatusBadge status={wfStatus} />
+            <h2 className="mono">{w.workflowType}</h2>
+            <span className="wfm-id">#{w.id}</span>
+            <div className="x" onClick={onClose}><Ic name="x" size={17} /></div>
+          </div>
+          <div className="wfm-sub mono">
+            <span><Ic name="workflow" size={12} /> run {runId(w.id)}</span>
+            <span><Ic name="worker" size={12} /> {w.taskQueue}</span>
+            <span><Ic name="clock" size={12} /> started {timeAgo(w.createdAt, now)}</span>
+          </div>
+        </div>
+
+        {/* fields */}
+        <div className="wfm-fields">
+          <Field label="Status"><StatusBadge status={wfStatus} /></Field>
+          <Field label="Type" mono>{w.workflowType}</Field>
+          <Field label="Task Queue"><span className="qtag">{w.taskQueue}</span></Field>
+          <Field label="Activities" mono>{activities.length}</Field>
+          <Field label="Start" mono>{fmtClock(w.createdAt)}</Field>
+          <Field label={w.completedAt ? 'End' : 'Elapsed'} mono>
+            {w.completedAt
+              ? fmtClock(w.completedAt)
+              : <span style={{ color: 'var(--st-running)' }}>{fmtDur(Math.max(0, now - t0))}</span>}
+          </Field>
+          <Field label="Duration" mono>{w.completedAt
+            ? fmtDur(dur)
+            : <span style={{ color: 'var(--st-running)' }}>{fmtDur(Math.max(0, dur))} (running)</span>}</Field>
+          <Field label="Workflow Id" mono>{runId(w.id)}</Field>
+        </div>
+        {w.error && (
+          <div className="wfm-err mono"><Ic name="alert" size={14} /> {w.error}</div>
+        )}
+
+        {/* tabs */}
+        <div className="wfm-tabs">
+          <button className={'wfm-tab' + (tab === 'timeline' ? ' on' : '')} onClick={() => setTab('timeline')}>
+            <Ic name="activity" size={14} /> Timeline <span className="n">{activities.length}</span>
+          </button>
+          <button className={'wfm-tab' + (tab === 'events' ? ' on' : '')} onClick={() => setTab('events')}>
+            <Ic name="dot" size={14} fill /> Events <span className="n">{events.length}</span>
+          </button>
+          {(w.input || w.result) && (
+            <button className={'wfm-tab' + (tab === 'io' ? ' on' : '')} onClick={() => setTab('io')}>
+              <Ic name="copy" size={13} /> Input &amp; Result
+            </button>
+          )}
+        </div>
+
+        {/* body */}
+        <div className="wfm-body">
+          {tab === 'timeline' && <Timeline activities={activities} t0={t0} t1={t1} now={now} running={!w.completedAt} />}
+          {tab === 'events' && <EventTable events={events} now={now} />}
+          {tab === 'io' && <IoPanel input={w.input} result={w.result} error={w.error} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children, mono }) {
+  return (
+    <div className="wfm-field">
+      <div className="wfm-fl">{label}</div>
+      <div className={'wfm-fv' + (mono ? ' mono' : '')}>{children}</div>
+    </div>
+  );
+}
+
+/* ---------------- Timeline (Gantt of activities) ---------------- */
+function Timeline({ activities, t0, t1, now, running }) {
+  const TL = window.TLData;
+  const span = Math.max(1, t1 - t0);
+  const ticks = useMemoM(() => {
+    const n = 6, out = [];
+    for (let i = 0; i <= n; i++) out.push({ pct: (i / n) * 100, label: '+' + TL.fmtDuration(Math.round((span * i) / n)) });
+    return out;
+  }, [span]);
+  const [open, setOpen] = useStateM(null);
+
+  if (activities.length === 0) {
+    return <div className="empty" style={{ height: 160 }}><Ic name="activity" size={26} />
+      <div>No activities scheduled yet for this workflow.</div></div>;
+  }
+
+  return (
+    <div className="gantt">
+      <div className="gantt-axis">
+        <div className="gantt-axhead">activity</div>
+        <div className="gantt-axtrack">
+          {ticks.map((tk, i) => (
+            <div className="gantt-tick" key={i} style={{ left: tk.pct + '%' }}>
+              <span className="gantt-ticklbl">{i === 0 ? '0s' : tk.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="gantt-rows">
+        {activities.map((a) => {
+          const segs = attemptSegments(a, now);
+          const c = window.STATUS_COLOR[a.status];
+          const isOpen = open === a.id;
+          return (
+            <React.Fragment key={a.id}>
+              <div className={'gantt-row' + (isOpen ? ' open' : '')} onClick={() => setOpen(isOpen ? null : a.id)}>
+                <div className="gantt-label">
+                  <span className="gl-seq mono">{a.seq}</span>
+                  <span className="gl-name">{a.name}</span>
+                  {a.attempt > 1 && <span className="gl-att mono">↻{a.attempt}</span>}
+                </div>
+                <div className="gantt-track">
+                  {ticks.map((tk, i) => <span className="gantt-grid" key={i} style={{ left: tk.pct + '%' }} />)}
+                  {segs.map((s, i) => {
+                    const left = ((s.start - t0) / span) * 100;
+                    const width = Math.max(0.6, ((s.end - s.start) / span) * 100);
+                    return (
+                      <React.Fragment key={i}>
+                        {s.gap && (
+                          <span className="gantt-gap" style={{
+                            left: ((s.gapStart - t0) / span) * 100 + '%',
+                            width: Math.max(0.4, ((s.start - s.gapStart) / span) * 100) + '%' }} />
+                        )}
+                        <span className={'gantt-seg' + (s.live ? ' live' : '')}
+                          style={{ left: left + '%', width: width + '%', '--c': window.STATUS_COLOR[s.kind] }}
+                          title={'attempt ' + s.n + ' · ' + window.statusLabel(s.kind)} />
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </div>
+              {isOpen && (
+                <div className="gantt-detail">
+                  <div className="gd-meta mono">
+                    <span><b>status</b> <StatusBadge status={a.status} /></span>
+                    <span><b>started</b> {TL.fmtClock(a.startTime)}</span>
+                    <span><b>duration</b> {a.durationMs != null ? TL.fmtDuration(a.durationMs) : '—'}</span>
+                    <span><b>attempts</b> {a.attempt}/{a.maxAttempts}</span>
+                    {a.nextRetryAt && <span style={{ color: 'var(--st-retrying)' }}><b>next retry</b> {TL.fmtClock(a.nextRetryAt)}</span>}
+                  </div>
+                  {a.lastError && <div className="gd-err mono">{a.lastError}</div>}
+                  <div className="gd-io">
+                    {a.input != null && <div className="gd-iocol"><div className="gd-iol">input</div><JsonView data={a.input} /></div>}
+                    {a.output != null && <div className="gd-iocol"><div className="gd-iol">output</div><JsonView data={a.output} /></div>}
+                  </div>
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// split an activity's event stream into positioned attempt segments + retry gaps
+function attemptSegments(a, now) {
+  const segs = [];
+  let cur = null, prevEnd = null;
+  for (const e of a.events) {
+    const ts = Date.parse(e.createdAt);
+    if (e.eventType === 'ACTIVITY_STARTED') {
+      let n = segs.length + 1;
+      try { n = JSON.parse(e.payload || '{}').attempt || n; } catch (_) {}
+      cur = { n, start: ts, end: now, kind: 'RUNNING', live: true,
+        gap: prevEnd != null, gapStart: prevEnd };
+      segs.push(cur);
+    } else if (cur) {
+      if (e.eventType === 'ACTIVITY_COMPLETED') { cur.end = ts; cur.kind = 'COMPLETED'; cur.live = false; prevEnd = ts; }
+      else if (e.eventType === 'ACTIVITY_FAILED') { cur.end = ts; cur.kind = 'FAILED'; cur.live = false; prevEnd = ts; }
+      else if (e.eventType === 'ACTIVITY_TIMEOUT') { cur.end = ts; cur.kind = 'TIMED_OUT'; cur.live = false; prevEnd = ts; }
+      else if (e.eventType === 'ACTIVITY_RETRY_SCHEDULED') { /* keep prevEnd for gap */ }
+    }
+  }
+  return segs;
+}
+
+/* ---------------- Events tab ---------------- */
+function compact(v, maxKeys) {
+  maxKeys = maxKeys || 4;
+  if (v == null) return '∅';
+  if (typeof v !== 'object') return String(v);
+  if (Array.isArray(v)) return '[' + v.length + ']';
+  const ks = Object.keys(v);
+  const parts = ks.slice(0, maxKeys).map((k) => {
+    let val = v[k];
+    if (val && typeof val === 'object') val = Array.isArray(val) ? '[' + val.length + ']' : '{…}';
+    else if (typeof val === 'string' && val.length > 24) val = val.slice(0, 24) + '…';
+    return k + ': ' + val;
+  });
+  if (ks.length > maxKeys) parts.push('+' + (ks.length - maxKeys));
+  return '{ ' + parts.join(', ') + ' }';
+}
+
+function EventDetail({ e }) {
+  let p = null; try { p = e.payload ? JSON.parse(e.payload) : null; } catch (_) {}
+  const TL = window.TLData;
+  const clk = (iso) => TL.fmtClock(iso).slice(0, 12);
+  switch (e.eventType) {
+    case 'ACTIVITY_STARTED':
+      return <span className="evd"><span className="att">attempt {p?.attempt ?? '?'}</span>
+        {p?.args != null && <><span className="sep">·</span><span className="lab">args </span><span className="args">{compact(p.args)}</span></>}</span>;
+    case 'ACTIVITY_COMPLETED':
+      return <span className="evd"><span className="ok">✓ result </span><span className="args">{compact(p)}</span></span>;
+    case 'ACTIVITY_FAILED':
+      return <span className="evd"><span className="err">✕ attempt {p?.attempt ?? '?'}{p?.terminal ? ' · terminal' : ''} </span><span className="err">{p?.error || ''}</span></span>;
+    case 'ACTIVITY_TIMEOUT':
+      return <span className="evd"><span className="warn">⏱ attempt {p?.attempt ?? '?'} timed out </span><span className="err">{p?.error || ''}</span></span>;
+    case 'ACTIVITY_RETRY_SCHEDULED':
+      return <span className="evd"><span className="warn">↻ retry {p?.attempt}→{p?.nextAttempt}</span>
+        <span className="sep">·</span><span className="meta">backoff {TL.fmtDuration(p?.backoffMs || 0)}</span>
+        {p?.fireAt && <><span className="sep">·</span><span className="meta">fires {clk(p.fireAt)}</span></>}</span>;
+    case 'WORKFLOW_CREATED':
+      return <span className="evd"><span className="lab">input </span><span className="args">{compact(p)}</span></span>;
+    case 'WORKFLOW_COMPLETED':
+      return <span className="evd"><span className="ok">✓ result </span><span className="args">{compact(p)}</span></span>;
+    case 'WORKFLOW_FAILED':
+      return <span className="evd"><span className="err">✕ {p?.error || compact(p)}</span></span>;
+    case 'WORKFLOW_TASK_QUEUED': return <span className="evd"><span className="meta">task enqueued · waiting for worker</span></span>;
+    case 'WORKFLOW_TASK_STARTED': return <span className="evd"><span className="meta">worker leased task</span></span>;
+    case 'WORKFLOW_TASK_COMPLETED': return <span className="evd"><span className="meta">workflow task replayed</span></span>;
+    case 'WORKFLOW_TASK_FAILED': return <span className="evd"><span className="err">task failed</span></span>;
+    default: return <span className="evd"><span className="args">{p ? compact(p) : '—'}</span></span>;
+  }
+}
+
+function EventTable({ events, now }) {
+  const TL = window.TLData;
+  const [open, setOpen] = useStateM(null);
+  return (
+    <div className="evtable">
+      <div className="evt-head mono">
+        <span>time</span><span>id</span><span>event</span><span>activity</span><span>details</span>
+      </div>
+      {events.map((e) => {
+        const c = window.STATUS_COLOR[e.eventType] || 'var(--st-pending)';
+        const isOpen = open === e.id;
+        return (
+          <div key={e.id}>
+            <div className={'evt-row mono' + (e.payload ? ' clickable' : '')}
+              onClick={() => e.payload && setOpen(isOpen ? null : e.id)}>
+              <span className="evt-time">{TL.fmtClock(e.createdAt).slice(0, 12)}</span>
+              <span className="evt-eid">{e.id}</span>
+              <span className="evt-type" style={{ color: c }}>
+                <span className="evt-dot" style={{ background: c }} />{e.eventType}</span>
+              <span className="evt-act">{e.activityName ? e.activityName + (e.seq != null ? ' ·' + e.seq : '') : '—'}</span>
+              <span className="evt-prev"><EventDetail e={e} />
+                {e.payload && <span className="evt-exp">{isOpen ? '▾' : '▸'}</span>}</span>
+            </div>
+            {isOpen && <div className="evt-payload"><JsonView data={e.payload} /></div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function IoPanel({ input, result, error }) {
+  return (
+    <div className="io-panel">
+      <div className="io-col">
+        <div className="io-l">input</div>
+        {input != null ? <JsonView data={input} /> : <div className="json null">—</div>}
+      </div>
+      <div className="io-col">
+        <div className="io-l">{error ? 'error' : 'result'}</div>
+        {error
+          ? <div className="json" style={{ color: 'var(--st-failed)', whiteSpace: 'pre-wrap' }}>{error}</div>
+          : (result != null ? <JsonView data={result} /> : <div className="json null">—</div>)}
+      </div>
+    </div>
+  );
+}
+
+function mapWfStatus(s) { return s; } // workflow statuses already align with STATUS_COLOR
+function runId(id) { return (id * 2654435761 % 0xffffff).toString(16).padStart(6, '0') + '-' + id; }
+
+Object.assign(window, { WorkflowModal });
+
+</script>
+<script type="text/babel" data-src="views.jsx">
+/* temporal-lite — main views */
+const { useState: useStateV, useMemo: useMemoV } = React;
+
+const COLS = [
+  { key: 'name', label: 'Activity' },
+  { key: 'status', label: 'Status' },
+  { key: 'workflow', label: 'Workflow' },
+  { key: 'attempt', label: 'Attempt' },
+  { key: 'startMs', label: 'Started' },
+  { key: 'durationMs', label: 'Duration' },
+];
+
+function ActivitiesView({ activities, now, layout, sort, setSort, selectedId, onSelect }) {
+  const fmtDur = window.TLData.fmtDuration;
+  const timeAgo = window.TLData.timeAgo;
+  const fmtClock = window.TLData.fmtClock;
+  const scale = useMemoV(() => {
+    const ds = activities.map((a) => a.durationMs || 0);
+    return Math.max(1000, ...ds);
+  }, [activities]);
+
+  if (activities.length === 0) {
+    return <div className="empty"><Ic name="activity" size={30} /><div>No activities match these filters.</div>
+      <div className="faint mono" style={{ fontSize: 11 }}>derived from wflow.events · ACTIVITY_*</div></div>;
+  }
+
+  if (layout === 'feed') {
+    return (
+      <div className="tablewrap" style={{ padding: 'var(--pad)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {activities.map((a) => {
+            const c = window.STATUS_COLOR[a.status];
+            return (
+              <div key={a.id} onClick={() => onSelect(a.id)}
+                style={{ background: a.id === selectedId ? 'var(--row-sel)' : 'var(--panel-2)',
+                  border: '1px solid var(--border)', borderLeft: '2px solid ' + c, borderRadius: 8,
+                  padding: '11px 14px', cursor: 'pointer', display: 'grid',
+                  gridTemplateColumns: '1fr auto', gap: 6, alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                  <span className="actname mono" style={{ fontSize: 13 }}>{a.name}</span>
+                  <StatusBadge status={a.status} />
+                  {a.attempt > 1 && <span className="attempt-pill warn">↻{a.attempt}</span>}
+                </div>
+                <div className="mono faint" style={{ fontSize: 11 }}>
+                  {a.endTime ? fmtDur(a.durationMs) : <span style={{ color: 'var(--st-running)' }}>{fmtDur(Math.max(0, now - a.startMs))}</span>}
+                </div>
+                <div className="wfref" style={{ gridColumn: '1 / 2' }}>
+                  {a.workflowType} <span className="faint">#{a.workflowId}</span> · <span className="qtag">{a.taskQueue}</span>
+                </div>
+                <div className="mono faint" style={{ fontSize: 10.5, textAlign: 'right' }}>{timeAgo(a.startTime, now)}</div>
+                {a.lastError && (a.status === 'FAILED' || a.status === 'RETRYING' || a.status === 'TIMED_OUT') &&
+                  <div className="mono" style={{ gridColumn: '1 / -1', fontSize: 11, color: 'var(--st-failed)',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.lastError}</div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  const arrow = (key) => sort.key === key ? <span className="arr">{sort.dir === 'asc' ? '▲' : '▼'}</span> : null;
+  return (
+    <div className="tablewrap">
+      <table className="grid">
+        <thead>
+          <tr>
+            {COLS.map((c) => (
+              <th key={c.key} onClick={() => setSort(c.key)}>{c.label}{arrow(c.key)}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {activities.map((a) => {
+            const c = window.STATUS_COLOR[a.status];
+            const live = window.isLive(a.status);
+            return (
+              <tr key={a.id} className={a.id === selectedId ? 'sel' : ''} onClick={() => onSelect(a.id)}>
+                <td>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="actname">{a.name}</span>
+                    <span className="muted-id">#{a.id}</span>
+                  </div>
+                </td>
+                <td><StatusBadge status={a.status} /></td>
+                <td><span className="wfref"><b>{a.workflowType}</b> <span className="faint">#{a.workflowId}</span></span></td>
+                <td>
+                  <span className={'attempt-pill' + (a.attempt >= a.maxAttempts ? ' bad' : a.attempt > 1 ? ' warn' : '')}>
+                    {a.attempt > 1 && '↻ '}{a.attempt}<span className="faint">/{a.maxAttempts}</span>
+                  </span>
+                </td>
+                <td className="cellmono faint" title={a.startTime}>{timeAgo(a.startTime, now)}</td>
+                <td>
+                  {live
+                    ? <LiveDuration startMs={a.startMs} now={now} />
+                    : <DurationBar ms={a.durationMs} scale={scale} color={c} />}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ------- Activities stat header -------
+function ActivityStats({ activities, now }) {
+  const s = useMemoV(() => {
+    const by = { RUNNING: 0, RETRYING: 0, COMPLETED: 0, FAILED: 0, TIMED_OUT: 0 };
+    let durSum = 0, durN = 0;
+    for (const a of activities) {
+      by[a.status] = (by[a.status] || 0) + 1;
+      if (a.durationMs != null) { durSum += a.durationMs; durN++; }
+    }
+    const failed = by.FAILED + by.TIMED_OUT;
+    const total = activities.length || 1;
+    return { by, avg: durN ? durSum / durN : 0, successRate: Math.round((by.COMPLETED / total) * 100), failed };
+  }, [activities]);
+  const spark = useMemoV(() => Array.from({ length: 16 }, () => 20 + Math.random() * 80), [Math.floor(now / 4000)]);
+  return (
+    <div className="stats">
+      <div className="stat">
+        <div className="label">Active now</div>
+        <div className="val" style={{ color: 'var(--st-running)' }}>{s.by.RUNNING + s.by.RETRYING}
+          <small> running</small></div>
+        <div className="spark">{spark.map((h, i) => <i key={i} style={{ height: h + '%' }} />)}</div>
+      </div>
+      <div className="stat"><div className="label">Retrying</div>
+        <div className="val" style={{ color: 'var(--st-retrying)' }}>{s.by.RETRYING}</div></div>
+      <div className="stat"><div className="label">Failed / timeout</div>
+        <div className="val" style={{ color: s.failed ? 'var(--st-failed)' : 'var(--text)' }}>{s.failed}</div></div>
+      <div className="stat"><div className="label">Completed</div>
+        <div className="val" style={{ color: 'var(--st-completed)' }}>{s.by.COMPLETED}</div></div>
+      <div className="stat"><div className="label">Avg duration</div>
+        <div className="val">{window.TLData.fmtDuration(Math.round(s.avg))}</div></div>
+    </div>
+  );
+}
+
+// ------- Workflows view -------
+function WorkflowsView({ workflows, now, onOpenWf }) {
+  const fmtDate = window.TLData.fmtDate;
+  const fmtDur = window.TLData.fmtDuration;
+  if (workflows.length === 0) {
+    return <div className="empty"><Ic name="workflow" size={30} /><div>No workflows match these filters.</div></div>;
+  }
+  return (
+    <div className="tablewrap">
+      <table className="grid">
+        <thead><tr>
+          <th>Status</th><th>Workflow</th><th>Run Id</th><th>Started</th><th>Duration</th>
+        </tr></thead>
+        <tbody>
+          {workflows.map((w) => {
+            const dur = w.completedAt ? Date.parse(w.completedAt) - Date.parse(w.createdAt) : now - Date.parse(w.createdAt);
+            return (
+              <tr key={w.id} onClick={() => onOpenWf(w.id)}>
+                <td><StatusBadge status={w.status} /></td>
+                <td><span className="actname mono">{w.workflowType}</span> <span className="muted-id">#{w.id}</span></td>
+                <td className="cellmono faint">{(w.id * 2654435761 % 0xffffff).toString(16).padStart(6, '0')}</td>
+                <td className="cellmono dim" title={w.createdAt}>{fmtDate(w.createdAt)}</td>
+                <td className="cellmono">{w.completedAt ? fmtDur(dur) : <span style={{ color: 'var(--st-running)' }}>{fmtDur(Math.max(0, dur))}</span>}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ------- Workers view -------
+function WorkersView({ workers, now }) {
+  const timeAgo = window.TLData.timeAgo;
+  return (
+    <div style={{ overflow: 'auto', flex: 1 }}>
+      <div className="workers">
+        {workers.map((w) => {
+          const load = Math.round((w.activeTasks / w.capacity) * 100);
+          const c = w.status === 'ALIVE' ? 'var(--st-completed)' : 'var(--st-retrying)';
+          return (
+            <div className="wcard" key={w.id}>
+              <div className="wh">
+                <span className="d" style={{ width: 8, height: 8, borderRadius: '50%', background: c }}></span>
+                <span className="name">{w.host}</span>
+                <span style={{ marginLeft: 'auto' }}><StatusBadge status={w.status === 'ALIVE' ? 'COMPLETED' : 'RETRYING'} /></span>
+              </div>
+              <div className="wq">{w.taskQueues.map((q) => <span className="qtag" key={q}>{q}</span>)}</div>
+              <div className="mono faint" style={{ fontSize: 11 }}>{w.activeTasks}/{w.capacity} slots · {load}%</div>
+              <div className="load"><i style={{ width: load + '%', background: load > 80 ? 'var(--st-retrying)' : 'var(--accent)' }} /></div>
+              <div className="wmeta"><span>poll {w.pollRate}/s</span><span>♥ {timeAgo(w.lastHeartbeat, now)}</span></div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ------- Metrics view (Grafana-style) -------
+function axisLabel(ms, span) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  if (span <= 2 * 3600e3) return p(d.getHours()) + ':' + p(d.getMinutes());
+  if (span <= 2 * 86400e3) return p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  return d.toLocaleString('en-GB', { day: '2-digit', month: 'short' });
+}
+
+function LineChart({ series, height, area, lo, hi, bw, yFmt }) {
+  height = height || 120;
+  const n = series[0].values.length;
+  const W = 1000, H = height, pad = 6;
+  const max = Math.max(1, ...series.flatMap((s) => s.values.map((v) => (v == null ? 0 : v))));
+  const xy = (v, i) => {
+    const x = n <= 1 ? 0 : (i / (n - 1)) * W;
+    const y = H - pad - (Math.max(0, v == null ? 0 : v) / max) * (H - pad * 2);
+    return [x, y];
+  };
+  const linePath = (vals) => {
+    let started = false, d = '';
+    vals.forEach((v, i) => { if (v == null) return; const [x, y] = xy(v, i); d += (started ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' '; started = true; });
+    return d.trim();
+  };
+  const areaPath = (vals) => {
+    const lp = linePath(vals); if (!lp) return '';
+    const last = xy(vals[n - 1] ?? 0, n - 1), first = xy(vals.find((v) => v != null) ?? 0, vals.findIndex((v) => v != null));
+    return lp + ' L' + last[0].toFixed(1) + ' ' + (H - pad) + ' L' + first[0].toFixed(1) + ' ' + (H - pad) + ' Z';
+  };
+  const grid = [0.25, 0.5, 0.75].map((f) => H - pad - f * (H - pad * 2));
+  const ticks = [0, Math.floor((n - 1) / 2), n - 1];
+  return (
+    <div className="chart">
+      <div className="chart-y mono">
+        <span>{yFmt ? yFmt(max) : max}</span>
+        <span>{yFmt ? yFmt(max / 2) : Math.round(max / 2)}</span>
+        <span>0</span>
+      </div>
+      <div className="chart-main">
+        <svg viewBox={'0 0 ' + W + ' ' + H} preserveAspectRatio="none" style={{ width: '100%', height: H }}>
+          {grid.map((y, i) => <line key={i} x1="0" x2={W} y1={y} y2={y} className="grid-l" vectorEffect="non-scaling-stroke" />)}
+          {area && series.map((s, i) => <path key={'a' + i} d={areaPath(s.values)} fill={s.color} fillOpacity="0.12" stroke="none" />)}
+          {series.map((s, i) => <path key={'l' + i} d={linePath(s.values)} fill="none" stroke={s.color} strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />)}
+        </svg>
+        <div className="chart-x mono">
+          {ticks.map((i) => <span key={i}>{axisLabel(lo + (i + 1) * bw, hi - lo)}</span>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Sparkline({ values, color, height }) {
+  height = height || 36;
+  const n = values.length, W = 200, H = height, max = Math.max(1, ...values);
+  const xy = (v, i) => [n <= 1 ? 0 : (i / (n - 1)) * W, H - 2 - (Math.max(0, v) / max) * (H - 4)];
+  let d = '', a = '';
+  values.forEach((v, i) => { const [x, y] = xy(v, i); d += (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' '; });
+  if (d) { const l = xy(values[n - 1], n - 1), f = xy(values[0], 0); a = d + 'L' + l[0].toFixed(1) + ' ' + H + ' L' + f[0].toFixed(1) + ' ' + H + ' Z'; }
+  return (
+    <svg viewBox={'0 0 ' + W + ' ' + H} preserveAspectRatio="none" style={{ width: '100%', height: H, display: 'block' }}>
+      <path d={a} fill={color} fillOpacity="0.14" stroke="none" />
+      <path d={d.trim()} fill="none" stroke={color} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+function Kpi({ label, value, sub, spark, color }) {
+  return (
+    <div className="kpi">
+      <div className="kpi-l">{label}</div>
+      <div className="kpi-v mono" style={{ color }}>{value}{sub && <small> {sub}</small>}</div>
+      <div className="kpi-spark"><Sparkline values={spark} color={color} /></div>
+    </div>
+  );
+}
+
+function GPanel({ title, legend, children }) {
+  return (
+    <div className="gpanel">
+      <div className="gpanel-h">
+        <span className="gpanel-t">{title}</span>
+        {legend && <div className="legend">{legend.map((l) => (
+          <span key={l.name} className="lg"><span className="lg-d" style={{ background: l.color }} />{l.name}</span>
+        ))}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function MetricsView({ metrics, now }) {
+  const m = metrics, TL = window.TLData;
+  const C = {
+    created: 'var(--st-running)', queue: 'var(--st-retrying)', schedule: 'var(--st-cancelled)',
+    exec: 'var(--accent)', completed: 'var(--st-completed)', failed: 'var(--st-failed)',
+    started: 'var(--st-running)', success: 'var(--st-completed)', dur: 'var(--accent)',
+  };
+  return (
+    <div style={{ overflow: 'auto', flex: 1 }}>
+      <div className="kpis">
+        <Kpi label="Workflows created" value={m.cur.created} sub="in range" spark={m.created} color={C.created} />
+        <Kpi label="Tasks in queue" value={m.cur.queue} sub="now" spark={m.queue} color={C.queue} />
+        <Kpi label="Schedule waiting" value={m.cur.schedule} sub="now" spark={m.schedule} color={C.schedule} />
+        <Kpi label="Executing tasks" value={m.cur.executing} sub="now" spark={m.executing} color={C.exec} />
+      </div>
+
+      <div className="gpanels">
+        <GPanel title="Workflows created / interval">
+          <LineChart series={[{ name: 'created', color: C.created, values: m.created }]} area lo={m.lo} hi={m.hi} bw={m.bw} />
+        </GPanel>
+        <GPanel title="In-flight breakdown"
+          legend={[{ name: 'executing', color: C.exec }, { name: 'queue', color: C.queue }, { name: 'schedule', color: C.schedule }]}>
+          <LineChart series={[
+            { name: 'executing', color: C.exec, values: m.executing },
+            { name: 'queue', color: C.queue, values: m.queue },
+            { name: 'schedule', color: C.schedule, values: m.schedule },
+          ]} lo={m.lo} hi={m.hi} bw={m.bw} />
+        </GPanel>
+        <GPanel title="Activity throughput"
+          legend={[{ name: 'started', color: C.started }, { name: 'completed', color: C.completed }, { name: 'failed', color: C.failed }]}>
+          <LineChart series={[
+            { name: 'started', color: C.started, values: m.started },
+            { name: 'completed', color: C.completed, values: m.completed },
+            { name: 'failed', color: C.failed, values: m.failed },
+          ]} lo={m.lo} hi={m.hi} bw={m.bw} />
+        </GPanel>
+        <GPanel title={'Activity success rate · ' + m.cur.successPct + '%'}>
+          <LineChart series={[{ name: 'success', color: C.success, values: m.successRate }]} area lo={m.lo} hi={m.hi} bw={m.bw} yFmt={(v) => Math.round(v) + '%'} />
+        </GPanel>
+        <GPanel title={'Avg activity duration · ' + TL.fmtDuration(Math.round(m.cur.avgDurationMs))}>
+          <LineChart series={[{ name: 'dur', color: C.dur, values: m.avgDur }]} area lo={m.lo} hi={m.hi} bw={m.bw} yFmt={(v) => TL.fmtDuration(Math.round(v))} />
+        </GPanel>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { ActivitiesView, ActivityStats, WorkflowsView, WorkersView, MetricsView, COLS, Pager });
+
+function pageList(page, pages) {
+  const cur = page + 1, out = [];
+  if (pages <= 7) { for (let i = 1; i <= pages; i++) out.push(i); return out; }
+  out.push(1);
+  let s = Math.max(2, cur - 1), e = Math.min(pages - 1, cur + 1);
+  if (cur <= 3) { s = 2; e = 4; }
+  if (cur >= pages - 2) { s = pages - 3; e = pages - 1; }
+  if (s > 2) out.push('…');
+  for (let i = s; i <= e; i++) out.push(i);
+  if (e < pages - 1) out.push('…');
+  out.push(pages);
+  return out;
+}
+
+function Pager({ total, page, pageSize, onPage, onPageSize }) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const from = total === 0 ? 0 : page * pageSize + 1;
+  const to = Math.min(total, (page + 1) * pageSize);
+  const nums = pageList(page, pages);
+  return (
+    <div className="pager">
+      <span className="pg-info">{from}–{to} of {total}</span>
+      <div style={{ flex: 1 }}></div>
+      <div className="pg-ctrls">
+        <button className="pg-btn" disabled={page <= 0} onClick={() => onPage(page - 1)}>‹ Prev</button>
+        <div className="pg-pages">
+          {nums.map((n, i) => n === '…'
+            ? <span key={'e' + i} className="pg-ell">…</span>
+            : <button key={n} className={'pg-num' + (n - 1 === page ? ' on' : '')} onClick={() => onPage(n - 1)}>{n}</button>)}
+        </div>
+        <button className="pg-btn" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next ›</button>
+      </div>
+      <select className="sel" value={pageSize} onChange={(e) => onPageSize(+e.target.value)}>
+        {[10, 12, 20, 50].map((s) => <option key={s} value={s}>{s} / page</option>)}
+      </select>
+    </div>
+  );
+}
+
+</script>
+<script type="text/babel" data-src="app.jsx">
+/* temporal-lite — app shell, polling, filters, tweaks */
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "slate",
+  "accent": "#3ecf8e",
+  "density": "medium",
+  "pollMs": 3000
+}/*EDITMODE-END*/;
+
+const ACCENTS = {
+  "#3ecf8e": "oklch(0.74 0.13 158)",   // green
+  "#5b9dff": "oklch(0.72 0.12 256)",   // blue
+  "#e0a23a": "oklch(0.78 0.12 78)",    // amber
+  "#a78bfa": "oklch(0.70 0.15 285)",   // violet
+};
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const storeRef = useRef(null);
+  if (!storeRef.current) storeRef.current = window.TLData.createStore();
+  const store = storeRef.current;
+
+  const [tick, setTick] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  const [view, setView] = useState('workflows');
+  const [live, setLive] = useState(true);
+  const [idQuery, setIdQuery] = useState('');
+  const [statusSel, setStatusSel] = useState([]);
+  const [typeSel, setTypeSel] = useState([]);
+  const [timePreset, setTimePreset] = useState('all');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [openWfId, setOpenWfId] = useState(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(12);
+  const [metricTypes, setMetricTypes] = useState([]);
+
+  // theme tokens
+  useEffect(() => {
+    const r = document.documentElement;
+    r.setAttribute('data-theme', t.theme);
+    r.setAttribute('data-density', t.density);
+    if (t.accent && ACCENTS[t.accent]) r.style.setProperty('--accent', ACCENTS[t.accent]);
+  }, [t.theme, t.density, t.accent]);
+
+  // live clock + simulation
+  useEffect(() => {
+    const iv = setInterval(() => {
+      setNow(Date.now());
+      if (live) {
+        const changed = window.TLData.tickSimulation(store);
+        if (changed) setTick((x) => x + 1);
+      }
+    }, Math.max(400, t.pollMs));
+    return () => clearInterval(iv);
+  }, [live, t.pollMs, store]);
+
+  // derive activities once; group by workflow for progress + modal
+  const byId = useMemo(() => {
+    const m = {}; store.workflows.forEach((w) => (m[w.id] = w)); return m;
+  }, [tick, store]);
+  const activities = useMemo(
+    () => window.TLData.deriveActivities(store.events, byId),
+    [tick, store, byId]
+  );
+
+  // facets — distinct types & statuses as if fetched from the backend (not hardcoded)
+  const facets = useMemo(() => window.TLData.facets(store), [store, tick]);
+
+  // resolve the active time window [from, to] in ms
+  const timeWindow = useMemo(() => {
+    const MS = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3 };
+    if (timePreset === 'custom') {
+      return { from: customFrom ? Date.parse(customFrom) : -Infinity, to: customTo ? Date.parse(customTo) : Infinity };
+    }
+    if (MS[timePreset]) return { from: now - MS[timePreset], to: Infinity };
+    return { from: -Infinity, to: Infinity };
+  }, [timePreset, customFrom, customTo, now]);
+
+  // workflow filtering
+  const workflows = useMemo(() => {
+    let xs = store.workflows;
+    if (statusSel.length) xs = xs.filter((w) => statusSel.includes(w.status));
+    if (typeSel.length) xs = xs.filter((w) => typeSel.includes(w.workflowType));
+    if (idQuery.trim()) {
+      const q = idQuery.trim().replace(/^#/, '');
+      xs = xs.filter((w) => String(w.id).includes(q));
+    }
+    const { from, to } = timeWindow;
+    if (from !== -Infinity || to !== Infinity) {
+      xs = xs.filter((w) => { const ts = Date.parse(w.createdAt); return ts >= from && ts <= to; });
+    }
+    return [...xs].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  }, [store.workflows, statusSel, typeSel, idQuery, timeWindow, tick]);
+
+  const totalPages = Math.max(1, Math.ceil(workflows.length / pageSize));
+  const safePage = Math.min(page, totalPages - 1);
+  const pageWorkflows = useMemo(
+    () => workflows.slice(safePage * pageSize, safePage * pageSize + pageSize),
+    [workflows, safePage, pageSize]
+  );
+
+  // reset to first page when the filtered set changes
+  useEffect(() => { setPage(0); }, [idQuery, statusSel, typeSel, timePreset, customFrom, customTo, pageSize]);
+
+  const filtersActive = idQuery || statusSel.length || typeSel.length || timePreset !== 'all';
+  const resetFilters = () => {
+    setIdQuery(''); setStatusSel([]); setTypeSel([]); setTimePreset('all'); setCustomFrom(''); setCustomTo('');
+  };
+
+  const counts = useMemo(() => ({
+    workflows: store.workflows.length,
+    workers: store.workers.length,
+    running: store.workflows.filter((w) => w.status === 'RUNNING').length,
+  }), [store, tick]);
+
+  // events for the open workflow
+  const openWf = openWfId != null ? byId[openWfId] : null;
+  const [openEvents, setOpenEvents] = useState([]);
+  useEffect(() => {
+    if (openWfId == null) { setOpenEvents([]); return; }
+    let alive = true;
+    window.TLData.fetchEvents(openWfId).then((evs) => { if (alive) setOpenEvents(evs); });
+    return () => { alive = false; };
+  }, [openWfId]);
+
+  // metrics over the shared time window, optionally scoped to workflow type(s)
+  const metrics = useMemo(
+    () => window.TLData.buildMetrics(store, timeWindow.from, timeWindow.to, metricTypes),
+    [store, timeWindow, metricTypes, tick]
+  );
+  const metricsActive = metricTypes.length || timePreset !== 'all';
+  const resetMetrics = () => { setMetricTypes([]); setTimePreset('all'); setCustomFrom(''); setCustomTo(''); };
+
+  const NAV = [
+    { id: 'workflows', icon: 'workflow', label: 'Workflows', count: counts.workflows },
+    { id: 'workers', icon: 'worker', label: 'Workers', count: counts.workers },
+    { id: 'metrics', icon: 'chart', label: 'Metrics' },
+  ];
+  const titles = { workflows: 'Workflows', workers: 'Workers', metrics: 'Metrics' };
+
+  return (
+    <div className="app">
+      {/* sidebar */}
+      <nav className="sidebar">
+        <div className="brand">
+          <div className="brand-mark"><span>t</span></div>
+          <div>
+            <div className="brand-name">temporal<b>·lite</b></div>
+            <div className="brand-sub">workflow console</div>
+          </div>
+        </div>
+        <div className="nav">
+          <div className="nav-label">Observe</div>
+          {NAV.map((n) => (
+            <div key={n.id} className={'nav-item' + (view === n.id ? ' active' : '')} onClick={() => setView(n.id)}>
+              <Ic name={n.icon} size={15} />
+              <span>{n.label}</span>
+              {n.count != null && <span className="count">{n.count}</span>}
+            </div>
+          ))}
+        </div>
+        <div className="sidebar-foot">
+          <div>● {counts.running} running</div>
+          <div>{store.workflows.length} workflows</div>
+          <div className="faint">GET /workflow/api/workflows</div>
+        </div>
+      </nav>
+
+      {/* main */}
+      <main className="main">
+        <header className="topbar">
+          <h1>{titles[view]}</h1>
+          <div className="spacer"></div>
+          <div className={'live' + (live ? ' on' : '')} onClick={() => setLive((v) => !v)} title="Toggle live polling">
+            <span className="dot"></span>{live ? 'LIVE' : 'PAUSED'}
+          </div>
+          <div className={'poll' + (live ? '' : ' off')} title="Live refresh interval">
+            <span className="poll-l">every</span>
+            <input type="range" min={3} max={15} step={1} value={Math.round(Math.max(3000, t.pollMs) / 1000)}
+              onChange={(e) => setTweak('pollMs', +e.target.value * 1000)} />
+            <span className="poll-v mono">{Math.round(Math.max(3000, t.pollMs) / 1000)}s</span>
+          </div>
+          <button className="btn" onClick={() => { window.TLData.tickSimulation(store); setTick((x) => x + 1); setNow(Date.now()); }}>
+            <Ic name="refresh" size={14} />Refresh
+          </button>
+        </header>
+
+        {view === 'workflows' && (
+          <>
+            <div className="toolbar">
+              <div className="search" style={{ minWidth: 150 }}>
+                <Ic name="search" size={14} />
+                <input value={idQuery} onChange={(e) => setIdQuery(e.target.value)} placeholder="workflow id…" />
+                {idQuery && <span className="x" style={{ width: 18, height: 18 }} onClick={() => setIdQuery('')}><Ic name="x" size={12} /></span>}
+              </div>
+              <MultiSelect label="status" options={facets.statuses} selected={statusSel} onChange={setStatusSel}
+                dotColors={(s) => window.STATUS_COLOR[s]} />
+              <MultiSelect label="type" options={facets.types} selected={typeSel} onChange={setTypeSel} />
+              <DateRangePicker preset={timePreset} from={customFrom} to={customTo}
+                onPreset={setTimePreset} setFrom={setCustomFrom} setTo={setCustomTo} now={now} />
+              <div className="spacer"></div>
+              <button className={'btn reset' + (filtersActive ? '' : ' off')} onClick={resetFilters} disabled={!filtersActive}>
+                <Ic name="x" size={13} />Reset
+              </button>
+            </div>
+            <WorkflowsView workflows={pageWorkflows} now={now} onOpenWf={setOpenWfId} />
+            <Pager total={workflows.length} page={safePage} pageSize={pageSize}
+              onPage={setPage} onPageSize={setPageSize} />
+          </>
+        )}
+
+        {view === 'workers' && <WorkersView workers={store.workers} now={now} />}
+        {view === 'metrics' && (
+          <>
+            <div className="toolbar">
+              <MultiSelect label="workflow" options={facets.types} selected={metricTypes} onChange={setMetricTypes} />
+              <DateRangePicker preset={timePreset} from={customFrom} to={customTo}
+                onPreset={setTimePreset} setFrom={setCustomFrom} setTo={setCustomTo} now={now} />
+              <button className={'btn reset' + (metricsActive ? '' : ' off')} onClick={resetMetrics} disabled={!metricsActive}>
+                <Ic name="x" size={13} />Reset
+              </button>
+              <div className="spacer"></div>
+              <span className="pg-info mono">{window.TLData.fmtDate(new Date(metrics.lo).toISOString())} → {window.TLData.fmtDate(new Date(metrics.hi).toISOString())}</span>
+            </div>
+            <MetricsView metrics={metrics} now={now} />
+          </>
+        )}
+      </main>
+
+      {/* workflow modal */}
+      {openWf && <WorkflowModal workflow={openWf} events={openEvents} now={now} onClose={() => setOpenWfId(null)} />}
+
+      {/* tweaks */}
+      <TweaksPanel title="Tweaks">
+        <TweakSection label="Theme" />
+        <TweakSelect label="Palette" value={t.theme} options={['slate', 'carbon', 'terminal', 'midnight']}
+          onChange={(v) => setTweak('theme', v)} />
+        <TweakColor label="Accent" value={t.accent} options={Object.keys(ACCENTS)} onChange={(v) => setTweak('accent', v)} />
+        <TweakRadio label="Density" value={t.density} options={['compact', 'medium', 'ultra']} onChange={(v) => setTweak('density', v)} />
+        <TweakSection label="Live" />
+        <TweakSlider label="Poll interval" value={t.pollMs} min={3000} max={15000} step={1000} unit="ms" onChange={(v) => setTweak('pollMs', v)} />
+      </TweaksPanel>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+</script>
+</body>
 </html>
