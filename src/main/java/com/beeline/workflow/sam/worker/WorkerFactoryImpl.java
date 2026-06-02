@@ -5,7 +5,7 @@ import com.beeline.workflow.sam.api.Worker;
 import java.util.ArrayList;
 import java.util.List;
 
-public class WorkerFactoryImpl {
+public class  WorkerFactoryImpl {
     private List<Worker> workerList = new ArrayList<>();
 
 
